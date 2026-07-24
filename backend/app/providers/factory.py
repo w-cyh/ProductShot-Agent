@@ -1,9 +1,9 @@
 from app.config import settings
 from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.dashscope_text_provider import DashscopeTextProvider
-from app.providers.mock_image_provider import MockImageProvider
-from app.providers.mock_text_provider import MockTextProvider
 from app.providers.openai_image_provider import OpenAIImageProvider
+from app.providers.openai_text_provider import OpenAITextProvider
+from app.providers.text_provider import ProviderConfigurationError
 
 
 def get_image_provider():
@@ -11,10 +11,12 @@ def get_image_provider():
         return OpenAIImageProvider()
     if settings.image_provider == "dashscope":
         return DashscopeImageProvider()
-    return MockImageProvider()
+    raise ProviderConfigurationError("IMAGE_PROVIDER must be configured as 'openai' or 'dashscope'.")
 
 
 def get_text_provider():
     if settings.text_provider == "dashscope":
         return DashscopeTextProvider()
-    return MockTextProvider()
+    if settings.text_provider == "openai":
+        return OpenAITextProvider()
+    raise ProviderConfigurationError("TEXT_PROVIDER must be configured as 'openai' or 'dashscope'.")

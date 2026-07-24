@@ -11,10 +11,10 @@ import httpx
 
 from app.config import settings
 from app.providers.image_provider import GeneratedImageFile
-from app.providers.mock_image_provider import MockImageProvider
+from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
 
 
-class DashscopeImageProvider(MockImageProvider):
+class DashscopeImageProvider:
     name = "dashscope"
     capabilities = {"text_to_image", "image_to_image", "reference_image"}
 
@@ -28,7 +28,9 @@ class DashscopeImageProvider(MockImageProvider):
 
     def generate_images(self, **kwargs):
         if not self.api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY is required when IMAGE_PROVIDER=dashscope.")
+            raise ProviderConfigurationError("DASHSCOPE_API_KEY is not configured.")
+        if not self.model:
+            raise ProviderConfigurationError("DashScope image model is not configured.")
 
         project_id = kwargs["project_id"]
         positive_prompt = kwargs["positive_prompt"]
@@ -104,7 +106,7 @@ class DashscopeImageProvider(MockImageProvider):
 
         images = self._extract_image_urls(response)
         if not images:
-            raise RuntimeError(f"DashScope image response did not include generated image URLs: {response}")
+            raise ProviderRequestError(f"DashScope image response did not include generated image URLs: {response}")
         return images
 
     def _source_image_reference(self, source_image_path: str | None) -> str | None:
@@ -115,7 +117,7 @@ class DashscopeImageProvider(MockImageProvider):
             return None
         mime_type, _ = mimetypes.guess_type(path)
         if not mime_type or not mime_type.startswith("image/"):
-            raise RuntimeError(f"Unsupported source image type for DashScope: {path.name}")
+            raise ProviderRequestError(f"Unsupported source image type for DashScope: {path.name}")
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
 
@@ -144,16 +146,16 @@ class DashscopeImageProvider(MockImageProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise RuntimeError(f"DashScope image task creation failed: {self._dashscope_error(exc.response)}") from exc
+            raise ProviderRequestError(f"DashScope image task creation failed: {self._dashscope_error(exc.response)}") from exc
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"DashScope image task creation failed: {exc}") from exc
+            raise ProviderRequestError(f"DashScope image task creation failed: {exc}") from exc
 
         data = response.json()
         if self._get(data, "code"):
-            raise RuntimeError(f"DashScope image task creation failed: {self._dashscope_error(data)}")
+            raise ProviderRequestError(f"DashScope image task creation failed: {self._dashscope_error(data)}")
         task_id = self._get(self._get(data, "output", default={}), "task_id")
         if not task_id:
-            raise RuntimeError(f"DashScope image task creation response did not include task_id: {data}")
+            raise ProviderRequestError(f"DashScope image task creation response did not include task_id: {data}")
         return str(task_id)
 
     def _poll_task(self, task_id: str) -> dict[str, Any]:
@@ -165,14 +167,14 @@ class DashscopeImageProvider(MockImageProvider):
                 response = httpx.get(url, headers=headers, timeout=settings.model_request_timeout)
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                raise RuntimeError(f"DashScope image task polling failed: {self._dashscope_error(exc.response)}") from exc
+                raise ProviderRequestError(f"DashScope image task polling failed: {self._dashscope_error(exc.response)}") from exc
             except httpx.HTTPError as exc:
-                raise RuntimeError(f"DashScope image task polling failed: {exc}") from exc
+                raise ProviderRequestError(f"DashScope image task polling failed: {exc}") from exc
 
             data = response.json()
             last_data = data
             if self._get(data, "code"):
-                raise RuntimeError(f"DashScope image task polling failed: {self._dashscope_error(data)}")
+                raise ProviderRequestError(f"DashScope image task polling failed: {self._dashscope_error(data)}")
 
             output = self._get(data, "output", default={})
             status = str(self._get(output, "task_status", default="")).upper()
@@ -180,10 +182,10 @@ class DashscopeImageProvider(MockImageProvider):
                 return data
             if status in {"FAILED", "CANCELED", "UNKNOWN"}:
                 message = self._get(data, "message") or self._get(output, "message") or status
-                raise RuntimeError(f"DashScope image task {task_id} ended with {status}: {message}")
+                raise ProviderRequestError(f"DashScope image task {task_id} ended with {status}: {message}")
             sleep(self.poll_interval_seconds)
 
-        raise RuntimeError(f"DashScope image task {task_id} did not finish before timeout: {last_data}")
+        raise ProviderRequestError(f"DashScope image task {task_id} did not finish before timeout: {last_data}")
 
     def _extract_image_urls(self, response: Any) -> list[str]:
         data = response if isinstance(response, dict) else getattr(response, "output", None)
@@ -228,8 +230,15 @@ class DashscopeImageProvider(MockImageProvider):
             response = httpx.get(image_url, timeout=settings.model_request_timeout)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"Failed to download DashScope image: {exc}") from exc
+            raise ProviderRequestError(f"Failed to download DashScope image: {exc}") from exc
         target.write_bytes(response.content)
 
     def _dashscope_size(self, size: str) -> str:
         return "2K"
+
+    def _parse_size(self, size: str) -> tuple[int | None, int | None]:
+        try:
+            width, height = size.lower().split("x", 1)
+            return int(width), int(height)
+        except (AttributeError, ValueError):
+            return None, None

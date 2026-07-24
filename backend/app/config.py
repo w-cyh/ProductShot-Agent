@@ -10,18 +10,20 @@ class Settings:
     upload_dir = backend_dir / "uploads"
     generated_dir = upload_dir / "generated"
     database_url = os.getenv("DATABASE_URL", f"sqlite:///{data_dir / 'productshot.db'}")
-    image_provider = os.getenv("IMAGE_PROVIDER", "mock").lower()
-    text_provider = os.getenv("TEXT_PROVIDER", "mock").lower()
-    text_model = os.getenv("TEXT_MODEL", "qwen3.7-plus")
+    image_provider = os.getenv("IMAGE_PROVIDER", "").lower()
+    text_provider = os.getenv("TEXT_PROVIDER", "").lower()
     openai_api_key = os.getenv("OPENAI_API_KEY")
+    openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    openai_text_model = os.getenv("OPENAI_TEXT_MODEL", "")
+    openai_image_model = os.getenv("OPENAI_IMAGE_MODEL", "")
     dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
     dashscope_workspace_id = os.getenv("DASHSCOPE_WORKSPACE_ID")
     dashscope_base_http_api_url = os.getenv(
         "DASHSCOPE_BASE_HTTP_API_URL",
         os.getenv("DASHSCOPE_TEXT_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"),
     )
-    dashscope_text_base_url = dashscope_base_http_api_url
-    dashscope_image_model = os.getenv("DASHSCOPE_IMAGE_MODEL", "wan2.7-image-pro")
+    dashscope_text_model = os.getenv("DASHSCOPE_TEXT_MODEL", os.getenv("TEXT_MODEL", ""))
+    dashscope_image_model = os.getenv("DASHSCOPE_IMAGE_MODEL", "")
     dashscope_image_generation_url = dashscope_base_http_api_url
     model_request_timeout = float(os.getenv("MODEL_REQUEST_TIMEOUT", "180"))
     cors_origins = [

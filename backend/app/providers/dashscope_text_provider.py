@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.providers.text_provider import TextProviderError, TextProviderUnavailable
+from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
 
 
 class DashscopeTextProvider:
@@ -13,7 +13,7 @@ class DashscopeTextProvider:
 
     def __init__(self) -> None:
         self.api_key = settings.dashscope_api_key
-        self.model = settings.text_model
+        self.model = settings.dashscope_text_model
         self.base_url = settings.dashscope_base_http_api_url.rstrip("/")
 
     def generate_json(
@@ -22,10 +22,13 @@ class DashscopeTextProvider:
         system_prompt: str,
         user_prompt: str,
         schema_name: str,
+        schema: dict[str, Any],
         temperature: float = 0.4,
     ) -> dict[str, Any]:
         if not self.api_key:
-            raise TextProviderUnavailable("DASHSCOPE_API_KEY is not configured.")
+            raise ProviderConfigurationError("DASHSCOPE_API_KEY is not configured.")
+        if not self.model:
+            raise ProviderConfigurationError("DashScope text model is not configured.")
 
         content = [
             {
@@ -46,10 +49,13 @@ class DashscopeTextProvider:
         user_prompt: str,
         image_path: str,
         schema_name: str,
+        schema: dict[str, Any],
         temperature: float = 0.2,
     ) -> dict[str, Any]:
         if not self.api_key:
-            raise TextProviderUnavailable("DASHSCOPE_API_KEY is not configured.")
+            raise ProviderConfigurationError("DASHSCOPE_API_KEY is not configured.")
+        if not self.model:
+            raise ProviderConfigurationError("DashScope text model is not configured.")
 
         content = [
             {"image": self._image_reference(image_path)},
@@ -78,7 +84,7 @@ class DashscopeTextProvider:
                 messages=[{"role": "user", "content": content}],
             )
         except Exception as exc:
-            raise TextProviderError(f"DashScope SDK request failed: {exc}") from exc
+            raise ProviderRequestError(f"DashScope SDK request failed: {exc}") from exc
 
     def _response_text(self, response: Any) -> str:
         try:

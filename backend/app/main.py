@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -6,6 +7,7 @@ from app.api import router
 from app.config import settings
 from app.database import Base, engine, ensure_sqlite_compat_schema
 from app import models  # noqa: F401
+from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
 
 
 def create_app() -> FastAPI:
@@ -22,6 +24,16 @@ def create_app() -> FastAPI:
     )
     app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
     app.include_router(router)
+
+    @app.exception_handler(ProviderConfigurationError)
+    @app.exception_handler(TextProviderUnavailable)
+    async def provider_configuration_error(_: Request, exc: TextProviderUnavailable) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @app.exception_handler(ProviderRequestError)
+    @app.exception_handler(TextProviderError)
+    async def provider_request_error(_: Request, exc: TextProviderError) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     @app.get("/health")
     def health() -> dict[str, str]:

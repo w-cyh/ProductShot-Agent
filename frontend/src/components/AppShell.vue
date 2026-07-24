@@ -52,7 +52,7 @@
             <Setting />
           </el-icon>
         </RouterLink>
-        <div class="shell-status">Mock Ready</div>
+        <div class="shell-status">Model Setup Required</div>
       </div>
     </aside>
 

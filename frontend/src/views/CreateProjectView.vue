@@ -83,8 +83,8 @@
         <div class="readiness-list">
           <div class="readiness-item">
             <span class="status-dot success"></span>
-            <strong>Mock 生图可运行</strong>
-            <p>没有真实图片生成 API 时，也可以完成演示链路。</p>
+            <strong>真实模型必需</strong>
+            <p>请先在模型管理页选择平台并配置对应的环境变量密钥。</p>
           </div>
           <div class="readiness-item">
             <span class="status-dot running"></span>

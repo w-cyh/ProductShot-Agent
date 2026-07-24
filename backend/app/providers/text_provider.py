@@ -8,7 +8,15 @@ class TextProviderError(RuntimeError):
 
 
 class TextProviderUnavailable(TextProviderError):
-    """Raised when a text provider is intentionally unavailable."""
+    """Raised when a text provider has not been configured."""
+
+
+class ProviderConfigurationError(TextProviderUnavailable):
+    """Raised when a required provider setting is missing or invalid."""
+
+
+class ProviderRequestError(TextProviderError):
+    """Raised when a configured upstream provider rejects or cannot complete a request."""
 
 
 class TextProvider(Protocol):
@@ -21,6 +29,19 @@ class TextProvider(Protocol):
         system_prompt: str,
         user_prompt: str,
         schema_name: str,
+        schema: dict[str, Any],
         temperature: float = 0.4,
+    ) -> dict[str, Any]:
+        ...
+
+    def generate_multimodal_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        temperature: float = 0.2,
     ) -> dict[str, Any]:
         ...

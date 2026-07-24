@@ -1,132 +1,83 @@
-from pathlib import Path
+import base64
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.agents import CreativePlannerAgent, ProductAnalysisAgent, RevisionAgent, VisualAnalysisAgent
+from app.agents import ProductAnalysisAgent, VisualAnalysisAgent
 from app.api.routes import test_text_model_connection as run_text_model_connection_test
 from app.config import settings
 from app.database import Base
-from app.models import Copywriting, Project, WorkflowEvent
+from app.models import Project, WorkflowEvent
 from app.providers import get_text_provider
-from app.providers.dashscope_text_provider import DashscopeTextProvider
 from app.providers.dashscope_image_provider import DashscopeImageProvider
-from app.providers.mock_image_provider import MockImageProvider
-from app.providers.text_provider import TextProviderUnavailable
-from app.schemas import VisualAnalysisReviewRequest
+from app.providers.dashscope_text_provider import DashscopeTextProvider
+from app.providers.openai_image_provider import OpenAIImageProvider
+from app.providers.openai_text_provider import OpenAITextProvider
+from app.providers.text_provider import ProviderConfigurationError
+from app.schemas import ProductAnalysisPayload, VisualAnalysisPayload
 from app.services import ProductShotWorkflow
 
 
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+        self.text = str(payload)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class FailingTextProvider:
+    name = "openai"
+    model = "test-model"
+
+    def generate_json(self, **_):
+        raise ProviderConfigurationError("OPENAI_API_KEY is not configured.")
+
+    def generate_multimodal_json(self, **_):
+        raise ProviderConfigurationError("OPENAI_API_KEY is not configured.")
+
+
 def sample_project() -> Project:
-    return Project(
-        id=1,
-        product_name="手工香薰蜡烛",
-        product_category="家居香氛",
-        core_selling_points="手工制作, 香味舒缓, 适合送礼",
-        target_platform="小红书",
-        target_audience="年轻女性",
-        preferred_style="温暖治愈风",
-    )
+    return Project(id=1, product_name="手工香薰蜡烛", product_category="家居香氛", core_selling_points="手工制作", target_platform="小红书")
 
 
-def test_product_analysis_agent_outputs_structured_marketing_context():
-    project = sample_project()
-    visual = VisualAnalysisAgent().run(project, "source.png")
-    result = ProductAnalysisAgent().run(project, "source.png", visual)
-
-    assert result.product_type == "家居香氛类商品"
-    assert "手工制作" in result.recommended_selling_points
-    assert result.image_issues
-    assert result.product_consistency_rules
+def test_text_provider_factory_requires_real_provider(monkeypatch):
+    monkeypatch.setattr(settings, "text_provider", "")
+    with pytest.raises(ProviderConfigurationError, match="TEXT_PROVIDER"):
+        get_text_provider()
 
 
-def test_creative_planner_agent_returns_three_plans():
-    project = sample_project()
-    analysis = ProductAnalysisAgent().run(project)
-    plans = CreativePlannerAgent().run(project, analysis)
-
-    assert len(plans) == 3
-    assert {plan.plan_name for plan in plans} == {"电商质感主图", "社媒生活方式封面", "促销礼物海报"}
-    assert all(plan.expected_outputs for plan in plans)
+def test_text_provider_factory_rejects_unknown_provider(monkeypatch):
+    monkeypatch.setattr(settings, "text_provider", "mock")
+    with pytest.raises(ProviderConfigurationError, match="TEXT_PROVIDER"):
+        get_text_provider()
 
 
-def test_revision_agent_classifies_copywriting_request():
-    project = sample_project()
-    analysis = ProductAnalysisAgent().run(project)
-    plan = CreativePlannerAgent().run(project, analysis)[0]
+def test_dashscope_text_provider_requires_key_and_model(monkeypatch):
+    monkeypatch.setattr(settings, "dashscope_api_key", None)
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    with pytest.raises(ProviderConfigurationError, match="DASHSCOPE_API_KEY"):
+        DashscopeTextProvider().generate_json(system_prompt="x", user_prompt="y", schema_name="Test", schema={})
 
-    result = RevisionAgent().run(project, plan, "文案不要太夸张")
-
-    assert result.revision_type == "copywriting"
-    assert not result.should_regenerate
-
-
-def test_mock_image_provider_copies_source_image(tmp_path: Path):
-    source = tmp_path / "source.png"
-    source.write_bytes(b"fake image bytes")
-    provider = MockImageProvider()
-
-    results = provider.generate_images(
-        project_id=999,
-        source_image_path=str(source),
-        positive_prompt="prompt",
-        negative_prompt="negative",
-        size="1024x1024",
-        count=2,
-    )
-
-    assert len(results) == 2
-    assert all(item.image_path.exists() for item in results)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "")
+    with pytest.raises(ProviderConfigurationError, match="text model"):
+        DashscopeTextProvider().generate_json(system_prompt="x", user_prompt="y", schema_name="Test", schema={})
 
 
-def test_text_provider_factory_uses_mock_by_default():
-    original_provider = settings.text_provider
-    try:
-        settings.text_provider = "mock"
-        provider = get_text_provider()
-    finally:
-        settings.text_provider = original_provider
-
-    assert provider.name == "mock"
-
-
-def test_dashscope_text_provider_requires_environment_key():
-    original_key = settings.dashscope_api_key
-    try:
-        settings.dashscope_api_key = None
-        provider = DashscopeTextProvider()
-        try:
-            provider.generate_json(system_prompt="x", user_prompt="y", schema_name="Test")
-        except TextProviderUnavailable as exc:
-            assert "DASHSCOPE_API_KEY" in str(exc)
-        else:
-            raise AssertionError("DashscopeTextProvider should require DASHSCOPE_API_KEY")
-    finally:
-        settings.dashscope_api_key = original_key
-
-
-def test_dashscope_image_provider_requires_environment_key():
-    original_key = settings.dashscope_api_key
-    try:
-        settings.dashscope_api_key = None
-        provider = DashscopeImageProvider()
-        try:
-            provider.generate_images(
-                project_id=123,
-                source_image_path=None,
-                positive_prompt="prompt",
-                negative_prompt="negative",
-                size="1024x1024",
-                count=1,
-            )
-        except RuntimeError as exc:
-            assert "DASHSCOPE_API_KEY" in str(exc)
-        else:
-            raise AssertionError("DashscopeImageProvider should require DASHSCOPE_API_KEY")
-    finally:
-        settings.dashscope_api_key = original_key
+def test_dashscope_image_provider_requires_key_and_model(monkeypatch):
+    monkeypatch.setattr(settings, "dashscope_api_key", None)
+    monkeypatch.setattr(settings, "dashscope_image_model", "wan-test")
+    with pytest.raises(ProviderConfigurationError, match="DASHSCOPE_API_KEY"):
+        DashscopeImageProvider().generate_images(project_id=1, source_image_path=None, positive_prompt="x", negative_prompt="y", size="1024x1024", count=1)
 
 
 def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
@@ -134,159 +85,107 @@ def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
     dashscope_module = ModuleType("dashscope")
     dashscope_module.base_http_api_url = ""
 
-    class FakeMultiModalConversation:
+    class FakeConversation:
         @staticmethod
         def call(**kwargs):
-            calls["kwargs"] = kwargs
-            return SimpleNamespace(
-                output=SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content=[{"text": '{"ok": true}'}])
-                        )
-                    ]
-                )
-            )
+            calls.update(kwargs)
+            return SimpleNamespace(output=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=[{"text": '{"ok": true}'}]))]))
 
-    dashscope_module.MultiModalConversation = FakeMultiModalConversation
+    dashscope_module.MultiModalConversation = FakeConversation
     monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
-
-    original_key = settings.dashscope_api_key
-    original_base = settings.dashscope_base_http_api_url
-    try:
-        settings.dashscope_api_key = "test-key"
-        settings.dashscope_base_http_api_url = "https://dashscope.aliyuncs.com/api/v1"
-        provider = DashscopeTextProvider()
-        result = provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test")
-    finally:
-        settings.dashscope_api_key = original_key
-        settings.dashscope_base_http_api_url = original_base
-
-    assert result == {"ok": True}
-    assert dashscope_module.base_http_api_url == "https://dashscope.aliyuncs.com/api/v1"
-    assert calls["kwargs"]["model"] == settings.text_model
-    assert calls["kwargs"]["messages"][0]["content"][0]["text"]
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    provider = DashscopeTextProvider()
+    assert provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test", schema={"type": "object"}) == {"ok": True}
+    assert calls["model"] == "qwen-test"
 
 
-def test_dashscope_image_provider_uses_async_http_generation(monkeypatch, tmp_path: Path):
+def test_dashscope_image_provider_uses_async_generation(monkeypatch, tmp_path: Path):
     calls = {}
 
-    class FakeResponse:
-        def __init__(self, payload):
-            self.payload = payload
-            self.text = str(payload)
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self.payload
-
     def fake_post(url, **kwargs):
-        calls["post_url"] = url
-        calls["post_kwargs"] = kwargs
-        return FakeResponse({"output": {"task_status": "PENDING", "task_id": "task-123"}, "request_id": "req-1"})
+        calls["post"] = (url, kwargs)
+        return FakeResponse({"output": {"task_id": "task-123"}})
 
     def fake_get(url, **kwargs):
-        calls["get_url"] = url
-        calls["get_kwargs"] = kwargs
-        return FakeResponse(
-            {
-                "output": {
-                    "task_status": "SUCCEEDED",
-                    "choices": [
-                        {
-                            "message": {
-                                "content": [
-                                    {"type": "image", "image": "https://example.com/generated.png"}
-                                ]
-                            }
-                        }
-                    ],
-                },
-                "request_id": "req-2",
-            }
-        )
+        calls["get"] = (url, kwargs)
+        return FakeResponse({"output": {"task_status": "SUCCEEDED", "choices": [{"message": {"content": [{"image": "https://example.com/image.png"}]}}]}})
 
-    def fake_download(self, image_url, target):
+    def fake_download(self, _url, target):
         target.write_bytes(b"image")
 
     monkeypatch.setattr("app.providers.dashscope_image_provider.httpx.post", fake_post)
     monkeypatch.setattr("app.providers.dashscope_image_provider.httpx.get", fake_get)
     monkeypatch.setattr(DashscopeImageProvider, "_download_image", fake_download)
+    monkeypatch.setattr(settings, "generated_dir", tmp_path)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_image_model", "wan-test")
     source = tmp_path / "source.png"
     source.write_bytes(b"source")
-
-    original_key = settings.dashscope_api_key
-    original_base = settings.dashscope_image_generation_url
-    try:
-        settings.dashscope_api_key = "test-key"
-        settings.dashscope_image_generation_url = "https://dashscope.aliyuncs.com/api/v1"
-        provider = DashscopeImageProvider()
-        results = provider.generate_images(
-            project_id=123,
-            source_image_path=str(source),
-            positive_prompt="prompt",
-            negative_prompt="negative",
-            size="1024x1024",
-            count=1,
-        )
-    finally:
-        settings.dashscope_api_key = original_key
-        settings.dashscope_image_generation_url = original_base
-
+    results = DashscopeImageProvider().generate_images(project_id=1, source_image_path=str(source), positive_prompt="prompt", negative_prompt="negative", size="1024x1024", count=1)
     assert len(results) == 1
-    assert calls["post_url"] == "https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation"
-    assert calls["post_kwargs"]["headers"]["X-DashScope-Async"] == "enable"
-    assert calls["post_kwargs"]["json"]["model"] == "wan2.7-image-pro"
-    assert calls["post_kwargs"]["json"]["parameters"]["size"] == "2K"
-    content = calls["post_kwargs"]["json"]["input"]["messages"][0]["content"]
-    assert content[0]["image"].startswith("data:image/png;base64,")
-    assert calls["get_url"] == "https://dashscope.aliyuncs.com/api/v1/tasks/task-123"
+    assert calls["post"][0].endswith("/services/aigc/image-generation/generation")
+    assert calls["get"][0].endswith("/tasks/task-123")
 
 
-def test_dashscope_image_provider_normalizes_full_generation_endpoint():
-    provider = DashscopeImageProvider()
+def test_openai_text_provider_uses_structured_responses(monkeypatch):
+    calls = {}
 
-    assert (
-        provider._base_api_url("https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation")
-        == "https://dashscope.aliyuncs.com/api/v1"
-    )
+    def fake_post(url, **kwargs):
+        calls["url"] = url
+        calls["payload"] = kwargs["json"]
+        return FakeResponse({"status": "completed", "output_text": '{"ok": true}'})
 
-
-def test_model_connection_test_returns_success_for_mock_provider():
-    original_provider = settings.text_provider
-    try:
-        settings.text_provider = "mock"
-        result = run_text_model_connection_test()
-    finally:
-        settings.text_provider = original_provider
-
-    assert result.status == "success"
-    assert result.provider == "mock"
-    assert "Mock" in result.message
+    monkeypatch.setattr("app.providers.openai_text_provider.httpx.post", fake_post)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_text_model", "gpt-test")
+    result = OpenAITextProvider().generate_json(system_prompt="system", user_prompt="user", schema_name="Test", schema={"type": "object"})
+    assert result == {"ok": True}
+    assert calls["url"].endswith("/responses")
+    assert calls["payload"]["text"]["format"]["type"] == "json_schema"
 
 
-def test_model_connection_test_returns_failure_when_dashscope_key_missing():
-    original_provider = settings.text_provider
-    original_key = settings.dashscope_api_key
-    try:
-        settings.text_provider = "dashscope"
-        settings.dashscope_api_key = None
-        result = run_text_model_connection_test()
-    finally:
-        settings.text_provider = original_provider
-        settings.dashscope_api_key = original_key
+def test_openai_image_provider_generates_and_edits(monkeypatch, tmp_path: Path):
+    calls = []
 
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+
+    monkeypatch.setattr("app.providers.openai_image_provider.httpx.post", fake_post)
+    monkeypatch.setattr(settings, "generated_dir", tmp_path)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_image_model", "gpt-image-test")
+    provider = OpenAIImageProvider()
+    generated = provider.generate_images(project_id=1, source_image_path=None, positive_prompt="x", negative_prompt="y", size="1024x1024", count=1)
+    source = tmp_path / "source.png"
+    source.write_bytes(b"source")
+    edited = provider.generate_images(project_id=2, source_image_path=str(source), positive_prompt="x", negative_prompt="y", size="1024x1024", count=1)
+    assert generated[0].image_path.read_bytes() == b"png"
+    assert edited[0].image_path.read_bytes() == b"png"
+    assert calls[0][0].endswith("/images/generations")
+    assert calls[1][0].endswith("/images/edits")
+
+
+def test_connection_test_reports_unconfigured_provider(monkeypatch):
+    monkeypatch.setattr(settings, "text_provider", "")
+    result = run_text_model_connection_test()
     assert result.status == "failed"
-    assert result.provider == "dashscope"
-    assert "DASHSCOPE_API_KEY" in result.message
+    assert result.provider == "unconfigured"
+    assert "TEXT_PROVIDER" in result.message
 
 
-def test_workflow_records_persistent_agent_event():
+def test_agents_do_not_fall_back_to_local_rules():
+    with pytest.raises(ProviderConfigurationError):
+        VisualAnalysisAgent(FailingTextProvider()).run(sample_project())
+    with pytest.raises(ProviderConfigurationError):
+        ProductAnalysisAgent(FailingTextProvider()).run(sample_project())
+
+
+def test_workflow_records_failed_model_event(monkeypatch):
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
-
+    monkeypatch.setattr("app.services.workflow.get_text_provider", lambda: FailingTextProvider())
     with Session(engine) as db:
         project = sample_project()
         project.id = None
@@ -294,98 +193,9 @@ def test_workflow_records_persistent_agent_event():
         db.add(project)
         db.commit()
         db.refresh(project)
-
-        workflow = ProductShotWorkflow(db)
-        workflow.analyze(project)
-
-        events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
-
-    assert {event.step_key for event in events} == {"visual_analysis", "analysis"}
-    assert all(event.status == "success" for event in events)
-    assert all(event.latency_ms is not None for event in events)
-
-
-def test_visual_analysis_human_review_updates_payload_and_feeds_analysis():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-
-    with Session(engine) as db:
-        project = sample_project()
-        project.id = None
-        project.status = "draft"
-        db.add(project)
-        db.commit()
-        db.refresh(project)
-
-        workflow = ProductShotWorkflow(db)
-        visual = workflow.ensure_visual_analysis(project)
-        edited = visual.analysis.model_copy(
-            update={
-                "product_appearance": "人工确认：白色玻璃香薰蜡烛，带金色标签。",
-                "fidelity_constraints": ["保留白色玻璃瓶", "保留金色标签"],
-            }
-        )
-        reviewed = workflow.review_visual_analysis(
-            project,
-            VisualAnalysisReviewRequest(
-                analysis=edited,
-                review_notes="LLM 把金色标签看成黄色贴纸，后续必须按金色标签处理。",
-            ),
-        )
-        analysis = workflow.analyze(project)
-        events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
-
-    assert reviewed.analysis.human_reviewed
-    assert "金色标签" in reviewed.analysis.human_review_notes
-    assert "人工确认" in analysis.analysis.visual_summary
-    assert any("人工审核意见" in item for item in analysis.analysis.image_issues)
-    assert "visual_review" in {event.step_key for event in events}
-
-
-def test_plan_stage_creates_three_directions_without_generation_tasks():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-
-    with Session(engine) as db:
-        project = sample_project()
-        project.id = None
-        project.status = "draft"
-        db.add(project)
-        db.commit()
-        db.refresh(project)
-
-        workflow = ProductShotWorkflow(db)
-        plans = workflow.plan(project)
-
-        task_count = len(project.generation_tasks)
-        events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
-
-    assert len(plans) == 3
-    assert task_count == 0
-    assert {event.step_key for event in events} == {"visual_analysis", "analysis", "plans"}
-
-
-def test_generate_pack_uses_selected_plan_and_creates_review_and_copy():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-
-    with Session(engine) as db:
-        project = sample_project()
-        project.id = None
-        project.status = "draft"
-        db.add(project)
-        db.commit()
-        db.refresh(project)
-
-        workflow = ProductShotWorkflow(db)
-        workflow.plan(project)
-        selected_plan = project.creative_plans[1]
-        selected_plan_id = selected_plan.id
-        result = workflow.generate_pack(project, selected_plan, 2)
-        copy_count = db.query(Copywriting).filter(Copywriting.project_id == project.id).count()
-        db.refresh(project)
-
-    assert len(result.images) == 2
-    assert all(image.plan_id == selected_plan_id for image in result.images)
-    assert any(image.is_recommended for image in result.images)
-    assert copy_count == 1
+        with pytest.raises(ProviderConfigurationError):
+            ProductShotWorkflow(db).ensure_visual_analysis(project)
+        event = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).one()
+    assert event.step_key == "visual_analysis"
+    assert event.status == "failed"
+    assert "OPENAI_API_KEY" in event.error_message

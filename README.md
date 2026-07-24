@@ -91,7 +91,7 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 
 **功能**：前端只允许调整文字推理 Provider、图片生成 Provider、模型名和 Base URL 等非敏感配置；API Key 始终从后端系统环境变量读取。
 
-**效果**：既方便本地切换 Mock / DashScope Provider，也避免把 secret 暴露给浏览器或提交到仓库。
+**效果**：可独立配置 OpenAI 与百炼 Provider，同时避免把 secret 暴露给浏览器或提交到仓库。
 
 ![模型管理](docs/assets/model-settings.png)
 
@@ -110,7 +110,7 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 3. 商品策略：结合用户输入与视觉分析，提炼人群、卖点、平台策略和视觉方向。
 4. 创意规划：生成 3 个可选营销方向，用户选择后再进入图片生成。
 5. Prompt Pack：为选中方向生成正向提示词、负向约束、尺寸和商品一致性要求。
-6. 图片生成：通过 Mock / DashScope / OpenAI Provider 抽象调用图片模型。
+6. 图片生成：通过 DashScope / OpenAI Provider 抽象调用真实图片模型。
 7. 质量评价：对生成图进行商品清晰度、商品一致性、风格匹配、商业价值和平台适配评分。
 8. 文案生成：生成标题、卖点、小红书、朋友圈、淘宝、抖音文案和标签。
 9. 自然语言修改：将用户修改意图分类为文案、平台、Prompt、风格、创意方案或图片修改。
@@ -136,9 +136,8 @@ flowchart LR
     Agents --> Copy["CopywritingAgent"]
     Agents --> Revision["RevisionAgent"]
 
-    Providers --> Mock["Mock Provider"]
     Providers --> DashScope["DashScope Provider"]
-    Providers --> OpenAI["OpenAI Image Provider 骨架"]
+    Providers --> OpenAI["OpenAI Provider"]
 ```
 
 | 模块 | 技术与职责 |
@@ -147,7 +146,7 @@ flowchart LR
 | 后端 | FastAPI, SQLAlchemy, SQLite, Pydantic；负责 API、校验、持久化和报告导出 |
 | Workflow | `ProductShotWorkflow` 编排 Agent、Provider、状态流转和 workflow_events |
 | Agent 层 | 视觉理解、商品策略、创意规划、Prompt、评分、文案和修改意图 |
-| Tool / Provider 层 | `TextProvider` 与 `ImageProvider` 抽象，隔离 Mock、DashScope 和 OpenAI |
+| Tool / Provider 层 | `TextProvider` 与 `ImageProvider` 抽象，隔离 DashScope 和 OpenAI |
 | Memory | SQLite 保存项目、原图、分析结果、方案、生成图、评分、文案和流程事件 |
 
 ## 6. Agent 工作流设计
@@ -172,7 +171,7 @@ Agent 设计原则：
 1. **职责单一**：每个 Agent 只处理一个明确节点，输出结构化 Pydantic Schema。
 2. **人机协同**：先生成多个方向，关键决策由用户选择，而不是全自动黑盒出图。
 3. **保真优先**：视觉分析阶段提取商品一致性规则，后续 Prompt 和评分都复用这些约束。
-4. **可降级运行**：真实模型不可用时，Mock Provider 和 fallback 逻辑仍能跑完整流程。
+4. **真实调用可见**：模型未配置或调用失败时，流程记录错误并停止，不会伪造本地结果。
 
 ## 7. Tool Use 设计
 
@@ -182,7 +181,7 @@ Agent 设计原则：
 | --- | --- | --- | --- |
 | `TextProvider.generate_json` | system prompt、user prompt、schema name | 结构化 JSON | 统一文字推理、策略、文案和评分输出 |
 | `generate_multimodal_json` | prompt + 图片路径 | 结构化视觉理解 / 评分 | 支持原图理解和生成图质量评价 |
-| `ImageProvider.generate_images` | source image、positive prompt、negative prompt、size、count | 本地图片文件与 URL | 隔离 Mock、DashScope、OpenAI 等图片生成实现 |
+| `ImageProvider.generate_images` | source image、positive prompt、negative prompt、size、count | 本地图片文件与 URL | 隔离 DashScope、OpenAI 等图片生成实现 |
 | `WorkflowEvent` 记录 | step、agent、status、detail、latency | 可视化流程诊断 | 让工具调用过程可追踪、可排错 |
 
 关键处理：
@@ -233,9 +232,9 @@ Agent 设计原则：
 
 ### 9.5 问题：真实模型接入与本地演示容易互相阻塞
 
-**方案**：默认使用 Mock Provider 跑通完整流程，真实 DashScope Provider 通过环境变量切换。
+**方案**：文字和图片均通过 OpenAI 或 DashScope 真实 Provider 调用，并由环境变量选择平台。
 
-**效果**：没有 API Key 时也能演示产品闭环；接入真实模型时无需改业务流程，只替换 Provider。
+**效果**：没有 API Key、模型名或 Provider 配置时会得到明确错误，避免误把本地结果当作模型输出。
 
 ## 10. 项目难点与解决方案
 
@@ -271,22 +270,30 @@ npm run dev
 
 前端默认运行在 `http://127.0.0.1:5173`。
 
-### 11.3 默认 Mock 流程
-
-默认情况下不需要真实模型 Key。Mock Provider 会复制上传原图或生成占位图，并返回结构化的分析、方案、评分和文案，适合本地演示完整产品闭环。
-
-### 11.4 可选：接入 DashScope
+### 11.3 接入 DashScope
 
 ```bash
 export TEXT_PROVIDER=dashscope
 export IMAGE_PROVIDER=dashscope
-export TEXT_MODEL=qwen3.7-plus
-export DASHSCOPE_IMAGE_MODEL=wan2.7-image-pro
+export DASHSCOPE_TEXT_MODEL=your_text_model
+export DASHSCOPE_IMAGE_MODEL=your_image_model
 export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 export DASHSCOPE_API_KEY=your_api_key
 ```
 
 注意：不要把真实 Key、个人专属 Base URL、Workspace ID、业务空间地址写入 `.env`、README、代码、测试或前端请求中。当前前端模型管理页只展示 Key 是否已在后端配置，并允许调整非敏感模型参数。
+
+### 11.4 接入 OpenAI
+
+```bash
+export TEXT_PROVIDER=openai
+export IMAGE_PROVIDER=openai
+export OPENAI_TEXT_MODEL=your_text_model
+export OPENAI_IMAGE_MODEL=your_image_model
+export OPENAI_API_KEY=your_api_key
+```
+
+未配置 Provider、密钥或对应模型名时，执行工作流会返回可操作错误，不会回退到本地规则或占位结果。
 
 ## 12. 验证方式
 
@@ -339,9 +346,7 @@ npm run build
 ## 14. 当前边界
 
 - 这是本地 MVP，不是生产级 SaaS。
-- 默认 Mock 图片生成不代表真实商品图生成质量，只用于验证产品流程。
 - 真实图片生成质量取决于所接入模型、原图质量、提示词和平台限制。
-- OpenAI 图片 Provider 当前是扩展骨架，真实生产接入仍需要补齐模型调用和异常处理。
 - 图片主体一致性、版权风险、平台合规、批量导出、账号体系和权限控制仍需要继续完善。
 - 数据默认存储在本地 SQLite 和 uploads 目录，暂未实现云端存储。
 

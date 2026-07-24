@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from time import perf_counter
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
@@ -8,7 +8,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import CreativePlan, GeneratedImage, GenerationTask, ProductAsset, Project, WorkflowEvent
 from app.providers import get_text_provider
-from app.providers.text_provider import TextProviderError, TextProviderUnavailable
+from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
 from app.schemas import (
     CopywritingRead,
     CopywritingRequest,
@@ -36,8 +36,8 @@ from app.storage import save_upload_file
 
 router = APIRouter(prefix="/api")
 
-TEXT_PROVIDERS = {"mock", "dashscope"}
-IMAGE_PROVIDERS = {"mock", "dashscope", "openai"}
+TEXT_PROVIDERS = {"openai", "dashscope"}
+IMAGE_PROVIDERS = {"openai", "dashscope"}
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -79,48 +79,33 @@ def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsRead:
         if value not in IMAGE_PROVIDERS:
             raise HTTPException(status_code=400, detail="不支持的图片模型 Provider")
         settings.image_provider = value
-    if "text_model" in updates and updates["text_model"]:
-        settings.text_model = updates["text_model"]
-    if "image_model" in updates and updates["image_model"]:
-        settings.dashscope_image_model = updates["image_model"]
-    if "dashscope_text_base_url" in updates and updates["dashscope_text_base_url"]:
-        settings.dashscope_base_http_api_url = updates["dashscope_text_base_url"].rstrip("/")
-        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
-        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
-    if "dashscope_image_generation_url" in updates and updates["dashscope_image_generation_url"]:
-        settings.dashscope_base_http_api_url = updates["dashscope_image_generation_url"].rstrip("/")
-        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
-        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
+    for provider_name, provider_updates in updates.get("providers", {}).items():
+        if provider_name not in TEXT_PROVIDERS:
+            raise HTTPException(status_code=400, detail="不支持的模型 Provider 配置")
+        _update_provider_settings(provider_name, provider_updates)
     return _model_settings_read()
 
 
 @router.post("/model-settings/test-text", response_model=ModelConnectionTestRead)
 def test_text_model_connection() -> ModelConnectionTestRead:
-    provider = get_text_provider()
     started = perf_counter()
-    checked_at = datetime.now(UTC).replace(tzinfo=None)
-    model = getattr(provider, "model", settings.text_model)
-    if provider.name == "mock":
-        return ModelConnectionTestRead(
-            provider=provider.name,
-            model=model,
-            status="success",
-            latency_ms=0,
-            message="Mock Provider 不需要外部 LLM 连接。",
-            checked_at=checked_at,
-        )
-
+    checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
     try:
+        provider = get_text_provider()
+        model = provider.model
         result = provider.generate_json(
             system_prompt="You are a connection test endpoint. Return a minimal JSON object.",
             user_prompt='Return {"ok": true, "message": "connected"} as JSON.',
             schema_name="ConnectionTest",
+            schema={"type": "object", "properties": {"ok": {"type": "boolean"}, "message": {"type": "string"}}, "required": ["ok"]},
             temperature=0,
         )
         ok = bool(result.get("ok", True))
         status = "success" if ok else "failed"
         message = str(result.get("message") or ("LLM 连接测试通过。" if ok else "LLM 返回了非成功结果。"))
-    except (TextProviderUnavailable, TextProviderError) as exc:
+    except (ProviderConfigurationError, TextProviderUnavailable, TextProviderError) as exc:
+        provider = None
+        model = ""
         status = "failed"
         message = str(exc)
     except Exception as exc:
@@ -128,7 +113,7 @@ def test_text_model_connection() -> ModelConnectionTestRead:
         message = f"LLM connection test failed: {exc}"
 
     return ModelConnectionTestRead(
-        provider=provider.name,
+        provider=provider.name if provider else (settings.text_provider or "unconfigured"),
         model=model,
         status=status,
         latency_ms=max(0, int((perf_counter() - started) * 1000)),
@@ -140,16 +125,44 @@ def test_text_model_connection() -> ModelConnectionTestRead:
 def _model_settings_read() -> ModelSettingsRead:
     return ModelSettingsRead(
         text_provider=settings.text_provider,
-        text_model=settings.text_model,
         image_provider=settings.image_provider,
-        image_model=settings.dashscope_image_model,
-        dashscope_text_base_url=settings.dashscope_base_http_api_url,
-        dashscope_image_generation_url=settings.dashscope_base_http_api_url,
+        providers={
+            "openai": {
+                "text_model": settings.openai_text_model,
+                "image_model": settings.openai_image_model,
+                "base_url": settings.openai_base_url,
+                "api_key_configured": bool(settings.openai_api_key),
+            },
+            "dashscope": {
+                "text_model": settings.dashscope_text_model,
+                "image_model": settings.dashscope_image_model,
+                "base_url": settings.dashscope_base_http_api_url,
+                "api_key_configured": bool(settings.dashscope_api_key),
+            },
+        },
         dashscope_workspace_id_configured=bool(settings.dashscope_workspace_id),
-        dashscope_api_key_configured=bool(settings.dashscope_api_key),
         available_text_providers=sorted(TEXT_PROVIDERS),
         available_image_providers=sorted(IMAGE_PROVIDERS),
     )
+
+
+def _update_provider_settings(provider_name: str, updates: dict[str, str]) -> None:
+    if provider_name == "openai":
+        if "text_model" in updates:
+            settings.openai_text_model = updates["text_model"].strip()
+        if "image_model" in updates:
+            settings.openai_image_model = updates["image_model"].strip()
+        if "base_url" in updates and updates["base_url"].strip():
+            settings.openai_base_url = updates["base_url"].rstrip("/")
+        return
+    if "text_model" in updates:
+        settings.dashscope_text_model = updates["text_model"].strip()
+    if "image_model" in updates:
+        settings.dashscope_image_model = updates["image_model"].strip()
+    if "base_url" in updates and updates["base_url"].strip():
+        settings.dashscope_base_http_api_url = updates["base_url"].rstrip("/")
+        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
+        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
 
 
 @router.post("/projects", response_model=ProjectRead)
@@ -287,6 +300,8 @@ def generate_images(
         raise HTTPException(status_code=404, detail="创意方案不存在")
     try:
         return ProductShotWorkflow(db).generate_images(project, plan, payload.count)
+    except (ProviderConfigurationError, ProviderRequestError):
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"图片生成失败：{exc}") from exc
 
@@ -304,6 +319,8 @@ def generate_pack(
         raise HTTPException(status_code=404, detail="创意方案不存在")
     try:
         return ProductShotWorkflow(db).generate_pack(project, plan, payload.count)
+    except (ProviderConfigurationError, ProviderRequestError):
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"素材包生成失败：{exc}") from exc
 

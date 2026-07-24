@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProjectCreate(BaseModel):
     product_name: str = Field(min_length=1, max_length=160)
-    product_category: str | None = None
-    core_selling_points: str | None = None
+    product_category: Optional[str] = None
+    core_selling_points: Optional[str] = None
     target_platform: str = Field(min_length=1, max_length=80)
-    target_audience: str | None = None
-    preferred_style: str | None = None
+    target_audience: Optional[str] = None
+    preferred_style: Optional[str] = None
 
 
 class ProjectRead(ProjectCreate):
@@ -33,8 +33,8 @@ class ProductAssetRead(BaseModel):
     file_path: str
     file_type: str
     is_primary: bool
-    width: int | None
-    height: int | None
+    width: Optional[int]
+    height: Optional[int]
     created_at: datetime
 
 
@@ -64,9 +64,9 @@ class ProductStrategyPayload(BaseModel):
     recommended_visual_styles: list[str]
     image_issues: list[str]
     marketing_angles: list[str]
-    visual_summary: str | None = None
+    visual_summary: Optional[str] = None
     product_consistency_rules: list[str] = Field(default_factory=list)
-    platform_strategy: str | None = None
+    platform_strategy: Optional[str] = None
 
 
 ProductAnalysisPayload = ProductStrategyPayload
@@ -136,12 +136,12 @@ class GenerationTaskRead(BaseModel):
 
     id: int
     project_id: int
-    plan_id: int | None
+    plan_id: Optional[int]
     prompt: str
     negative_prompt: str
     model_name: str
     status: str
-    error_message: str | None
+    error_message: Optional[str]
     created_at: datetime
     updated_at: datetime
 
@@ -152,15 +152,15 @@ class GeneratedImageRead(BaseModel):
     id: int
     task_id: int
     project_id: int
-    plan_id: int | None = None
-    platform: str | None = None
-    generation_mode: str | None = None
-    prompt_pack_id: str | None = None
+    plan_id: Optional[int] = None
+    platform: Optional[str] = None
+    generation_mode: Optional[str] = None
+    prompt_pack_id: Optional[str] = None
     image_url: str
     image_path: str
-    width: int | None
-    height: int | None
-    score: float | None
+    width: Optional[int]
+    height: Optional[int]
+    score: Optional[float]
     is_selected: bool
     is_recommended: bool = False
     created_at: datetime
@@ -194,7 +194,7 @@ class ImageReviewRead(BaseModel):
 
 
 class CopywritingRequest(BaseModel):
-    image_id: int | None = None
+    image_id: Optional[int] = None
 
 
 class CopywritingPayload(BaseModel):
@@ -211,36 +211,42 @@ class CopywritingPayload(BaseModel):
 class CopywritingRead(BaseModel):
     id: int
     project_id: int
-    image_id: int | None
+    image_id: Optional[int]
     copywriting: CopywritingPayload
     created_at: datetime
 
 
 class RevisionRequest(BaseModel):
-    target_image_id: int | None = None
+    target_image_id: Optional[int] = None
     instruction: str = Field(min_length=1)
+
+
+class ProviderModelSettingsRead(BaseModel):
+    text_model: str
+    image_model: str
+    base_url: str
+    api_key_configured: bool
+
+
+class ProviderModelSettingsUpdate(BaseModel):
+    text_model: Optional[str] = Field(default=None, max_length=120)
+    image_model: Optional[str] = Field(default=None, max_length=120)
+    base_url: Optional[str] = Field(default=None, max_length=300)
 
 
 class ModelSettingsRead(BaseModel):
     text_provider: str
-    text_model: str
     image_provider: str
-    image_model: str
-    dashscope_text_base_url: str
-    dashscope_image_generation_url: str
+    providers: dict[str, ProviderModelSettingsRead]
     dashscope_workspace_id_configured: bool
-    dashscope_api_key_configured: bool
     available_text_providers: list[str]
     available_image_providers: list[str]
 
 
 class ModelSettingsUpdate(BaseModel):
-    text_provider: str | None = Field(default=None, max_length=40)
-    text_model: str | None = Field(default=None, max_length=120)
-    image_provider: str | None = Field(default=None, max_length=40)
-    image_model: str | None = Field(default=None, max_length=120)
-    dashscope_text_base_url: str | None = Field(default=None, max_length=300)
-    dashscope_image_generation_url: str | None = Field(default=None, max_length=300)
+    text_provider: Optional[str] = Field(default=None, max_length=40)
+    image_provider: Optional[str] = Field(default=None, max_length=40)
+    providers: dict[str, ProviderModelSettingsUpdate] = Field(default_factory=dict)
 
 
 class ModelConnectionTestRead(BaseModel):
@@ -271,31 +277,31 @@ class WorkflowEventRead(BaseModel):
     status: str
     summary: str
     detail_json: str
-    error_message: str | None
+    error_message: Optional[str]
     started_at: datetime
-    ended_at: datetime | None
-    latency_ms: int | None
+    ended_at: Optional[datetime]
+    latency_ms: Optional[int]
 
 
 class ProjectDetail(ProjectRead):
     assets: list[ProductAssetRead]
-    visual_analysis: ProductVisualAnalysisRead | None = None
-    product_strategy: ProductAnalysisRead | None = None
-    latest_analysis: ProductAnalysisRead | None
+    visual_analysis: Optional[ProductVisualAnalysisRead] = None
+    product_strategy: Optional[ProductAnalysisRead] = None
+    latest_analysis: Optional[ProductAnalysisRead]
     creative_plans: list[CreativePlanRead]
     generated_images: list[GeneratedImageRead]
-    latest_copywriting: CopywritingRead | None
+    latest_copywriting: Optional[CopywritingRead]
     workflow_events: list[WorkflowEventRead]
 
 
 class ExportReport(BaseModel):
     project: ProjectRead
     assets: list[ProductAssetRead]
-    analysis: ProductAnalysisPayload | None
+    analysis: Optional[ProductAnalysisPayload]
     creative_plans: list[CreativePlanRead]
     generation_tasks: list[GenerationTaskRead]
     generated_images: list[GeneratedImageRead]
     image_reviews: list[ImageReviewRead]
     copywriting: list[CopywritingRead]
-    revision: RevisionResponse | None = None
+    revision: Optional[RevisionResponse] = None
     metadata: dict[str, Any]

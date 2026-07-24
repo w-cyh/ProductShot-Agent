@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -52,13 +52,26 @@ from app.utils.json import dumps, loads
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class LazyTextProvider:
+    """Defers provider validation until an agent actually requests an LLM response."""
+
+    name = "configured-provider"
+    model = ""
+
+    def generate_json(self, **kwargs):
+        return get_text_provider().generate_json(**kwargs)
+
+    def generate_multimodal_json(self, **kwargs):
+        return get_text_provider().generate_multimodal_json(**kwargs)
 
 
 class ProductShotWorkflow:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.text_provider = get_text_provider()
+        self.text_provider = LazyTextProvider()
         self.visual_agent = VisualAnalysisAgent(self.text_provider)
         self.analysis_agent = ProductAnalysisAgent(self.text_provider)
         self.planner_agent = CreativePlannerAgent(self.text_provider)

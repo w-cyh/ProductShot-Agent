@@ -206,28 +206,27 @@ export interface RevisionResponse {
 
 export interface ModelSettings {
   text_provider: string
-  text_model: string
   image_provider: string
-  image_model: string
-  dashscope_text_base_url: string
-  dashscope_image_generation_url: string
+  providers: Record<string, ProviderModelSettings>
   dashscope_workspace_id_configured: boolean
-  dashscope_api_key_configured: boolean
   available_text_providers: string[]
   available_image_providers: string[]
+}
+
+export interface ProviderModelSettings {
+  text_model: string
+  image_model: string
+  base_url: string
+  api_key_configured: boolean
 }
 
 export type ModelSettingsUpdate = Partial<
   Pick<
     ModelSettings,
     | 'text_provider'
-    | 'text_model'
     | 'image_provider'
-    | 'image_model'
-    | 'dashscope_text_base_url'
-    | 'dashscope_image_generation_url'
   >
->
+> & { providers?: Record<string, Partial<Pick<ProviderModelSettings, 'text_model' | 'image_model' | 'base_url'>>> }
 
 export interface ModelConnectionTest {
   provider: string

@@ -4,7 +4,7 @@
       <div>
         <span class="eyebrow">Creative Direction</span>
         <h1 class="page-title">创意方案</h1>
-        <p class="page-description">选择一个画面方向，系统会生成 Prompt、Mock 图片、评分和配套文案。</p>
+        <p class="page-description">选择一个画面方向，系统会生成 Prompt、真实图片、评分和配套文案。</p>
       </div>
       <el-button @click="$router.push(`/workflow/${id}`)">返回工作流</el-button>
     </div>

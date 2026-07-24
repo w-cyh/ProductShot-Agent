@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 
 from app.agents.llm import generate_payload
@@ -44,35 +46,7 @@ class PromptEngineerAgent:
             schema_name="PromptPackPayload",
             temperature=0.35,
         )
-        if model_payload is not None:
-            return model_payload
-
-        consistency_rules = analysis.product_consistency_rules if analysis else []
-        consistency_sentence = " ".join(consistency_rules) if consistency_rules else (
-            "Keep the original product shape, color, label, logo, packaging structure, and material consistent."
-        )
-        positive = (
-            f"Realistic product marketing photography for {project.product_name}. "
-            f"Scene: {plan.visual_description}. Background: {plan.background_scene}. "
-            f"Visual style: {plan.visual_style}. Highlight selling point: {plan.main_selling_point}. "
-            f"{consistency_sentence} "
-            "Professional commercial lighting, clean composition, high click appeal, platform-ready cover image."
-        )
-        negative = (
-            "distorted product, changed label, duplicated product, messy background, unreadable text, fake watermark, "
-            "extra fingers, low resolution, severe blur, overexposed highlights, random logo, AI artifacts"
-        )
-        return PromptPackPayload(
-            positive_prompt=positive,
-            negative_prompt=negative,
-            size=size,
-            style=plan.visual_style,
-            product_consistency_notes="保持商品主体清晰，不改变商品形状、颜色、标签和关键材质；避免生成乱码文字。",
-            platform=plan.applicable_platform or project.target_platform,
-            generation_mode="image_to_image",
-            reference_strength=0.72,
-            consistency_rules=consistency_rules,
-        )
+        return model_payload
 
     def _size_for_platform(self, platform: str) -> str:
         if "小红书" in platform:

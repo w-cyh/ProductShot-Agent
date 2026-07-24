@@ -30,27 +30,43 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 
 ## 3. 项目演示
 
-### 3.1 Step 0：整体生产流程
+### 3.1 整体生产流程
 
 **功能**：工作流被拆成 8 个可追踪阶段：原图理解、商品策略、方向规划、Prompt Pack、素材生成、质量评价、发布文案和导出素材。
 
-**效果**：面试官可以一眼看出这个项目不是简单调用图片模型，而是覆盖从商品输入到最终发布素材的完整链路。
-
 ![工作流概览](docs/assets/workflow-overview.png)
 
-### 3.2 Step 1：首页与项目入口
+### 3.2 首页与项目入口
 
 **功能**：首页提供新建项目、最近项目和项目历史入口，用户可以快速回到已有商品素材生产任务。
 
-**效果**：项目不是一次性 Demo 页面，而是围绕“项目”组织状态、素材、文案和历史结果。
-
 ![ProductShot 首页](docs/assets/productshot-home.png)
 
-### 3.3 Step 2：原图到营销图
+### 3.3 原图理解与商品策略
 
-**功能**：用户上传普通商品原图，系统根据商品分析和选中方向生成更适合平台发布的营销图。
+**功能**：VisualAnalysisAgent 读取原图，提取外观、材质、背景问题和保真约束；ProductAnalysisAgent 再结合商品信息生成卖点、人群和平台策略。
 
-**效果**：生成图保留白色毛绒主体、黑黄眼睛和红黄围巾等关键特征，同时去掉杂乱背景，形成更干净的商品展示画面。
+**效果**：后续 Prompt、生成图评分和文案都能复用同一份商品上下文，避免图片好看但商品主体失真。
+
+![原图分析与商品策略](docs/assets/studio-analysis.png)
+
+### 3.4 创意方向规划
+
+**功能**：CreativePlannerAgent 生成 3 个可选营销方向，每个方向包含画面描述、主打卖点、推荐理由、文案方向和预期产出。
+
+**效果**：用户先比较方向，再决定生成哪一路素材，降低盲目出图成本。
+
+![创意方向选择](docs/assets/studio-plans.png)
+
+### 3.5 素材生成、评分与文案
+
+**功能**：PromptEngineerAgent 为选中方向构建 Prompt Pack；ImageProvider 生成图片；ImageCriticAgent 评分并推荐最佳图；CopywritingAgent 生成多平台发布文案。
+
+**效果**：系统输出的不只是图片，还包括评分依据、推荐图、平台文案和标签，形成可发布素材包。
+
+![生成素材与文案](docs/assets/studio-output-copy.png)
+
+**原图到营销图**：生成图保留白色毛绒主体、黑黄眼睛和红黄围巾等关键特征，同时去掉杂乱背景，形成更干净的商品展示画面（这是其中一种创意方向）。
 
 <table>
   <tr>
@@ -63,45 +79,21 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
   </tr>
 </table>
 
-### 3.4 Step 3：原图理解与商品策略
-
-**功能**：VisualAnalysisAgent 读取原图，提取外观、材质、背景问题和保真约束；ProductAnalysisAgent 再结合商品信息生成卖点、人群和平台策略。
-
-**效果**：后续 Prompt、生成图评分和文案都能复用同一份商品上下文，避免图片好看但商品主体失真。
-
-![原图分析与商品策略](docs/assets/studio-analysis.png)
-
-### 3.5 Step 4：创意方向规划
-
-**功能**：CreativePlannerAgent 生成 3 个可选营销方向，每个方向包含画面描述、主打卖点、推荐理由、文案方向和预期产出。
-
-**效果**：用户先比较方向，再决定生成哪一路素材，降低盲目出图成本。
-
-![创意方向选择](docs/assets/studio-plans.png)
-
-### 3.6 Step 5：素材生成、评分与文案
-
-**功能**：PromptEngineerAgent 为选中方向构建 Prompt Pack；ImageProvider 生成图片；ImageCriticAgent 评分并推荐最佳图；CopywritingAgent 生成多平台发布文案。
-
-**效果**：系统输出的不只是图片，还包括评分依据、推荐图、平台文案和标签，形成可发布素材包。
-
-![生成素材与文案](docs/assets/studio-output-copy.png)
-
-### 3.7 Step 6：模型管理
-
-**功能**：前端只允许调整文字推理 Provider、图片生成 Provider、模型名和 Base URL 等非敏感配置；API Key 始终从后端系统环境变量读取。
-
-**效果**：可独立配置 OpenAI 与百炼 Provider，同时避免把 secret 暴露给浏览器或提交到仓库。
-
-![模型管理](docs/assets/model-settings.png)
-
-### 3.8 Step 7：Agent Trace 流程诊断
+### 3.6 Agent Trace 流程诊断
 
 **功能**：每个 Agent / Provider 节点都会记录状态、耗时、摘要和结构化详情。
 
 **效果**：模型调用慢、图片生成排队、评分失败、文案异常等问题可以在页面上定位，而不是只能翻后端日志。
 
 ![流程诊断](docs/assets/agent-trace.png)
+
+### 3.7 模型管理
+
+**功能**：前端允许调整文字推理 Provider、图片生成 Provider、模型名和 Base URL 等非敏感配置；API Key 始终从后端系统环境变量读取。
+
+**效果**：可独立配置 OpenAI 与百炼 Provider，同时避免把 secret 暴露给浏览器或提交到仓库。
+
+![模型管理](docs/assets/model-settings.png)
 
 ## 4. 核心功能
 

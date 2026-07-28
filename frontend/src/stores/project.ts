@@ -15,6 +15,9 @@ import {
 } from '../api/productshot'
 
 export type StepStatus = 'pending' | 'running' | 'success' | 'failed'
+export type WorkflowUiStatus = 'idle' | 'action_required' | 'running' | 'success' | 'failed'
+export type StudioStageKey = 'brief' | 'analysis' | 'plans' | 'generation' | 'delivery'
+export type StudioStageStatus = 'locked' | 'available' | 'current' | 'running' | 'success' | 'failed'
 
 export interface WorkflowStep {
   key: string
@@ -30,6 +33,24 @@ export interface ProgressItem {
   status: StepStatus
 }
 
+export interface WorkflowProgress {
+  active: boolean
+  title: string
+  percent: number
+  message: string
+  startedAt: string | null
+  items: ProgressItem[]
+}
+
+export interface StudioStage {
+  key: StudioStageKey
+  title: string
+  description: string
+  status: StudioStageStatus
+  available: boolean
+  lockedReason?: string
+}
+
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
 export const useProjectStore = defineStore('project', {
@@ -41,8 +62,9 @@ export const useProjectStore = defineStore('project', {
       title: '',
       percent: 0,
       message: '',
+      startedAt: null,
       items: [] as ProgressItem[]
-    },
+    } as WorkflowProgress,
     steps: [
       { key: 'visual_analysis', title: '原图理解', status: 'pending', description: '提取商品外观与保真约束' },
       { key: 'analysis', title: '商品策略', status: 'pending', description: '理解卖点、人群与平台策略' },
@@ -55,6 +77,18 @@ export const useProjectStore = defineStore('project', {
     ] as WorkflowStep[],
     lastReview: null as ImageReviewRead | null
   }),
+  getters: {
+    latestEventsByStep(state) {
+      const events = state.current?.workflow_events || []
+      return events.reduce<Record<string, (typeof events)[number]>>((latest, event) => {
+        if (!latest[event.step_key]) latest[event.step_key] = event
+        return latest
+      }, {})
+    },
+    hasRunningWorkflowEvent(): boolean {
+      return Object.values(this.latestEventsByStep).some((event) => event.status === 'running')
+    }
+  },
   actions: {
     async load(projectId: number) {
       this.loading = true
@@ -64,6 +98,11 @@ export const useProjectStore = defineStore('project', {
       } finally {
         this.loading = false
       }
+    },
+    async refresh(projectId: number) {
+      this.current = await getProject(projectId)
+      this.syncSteps()
+      this.syncGenerationProgressFromEvents()
     },
     resetCurrent() {
       this.current = null
@@ -197,6 +236,7 @@ export const useProjectStore = defineStore('project', {
         title: '正在理解原图',
         percent: 4,
         message: '准备启动 Agent 工作流。',
+        startedAt: new Date().toISOString(),
         items: [
           { key: 'visual_analysis', title: '原图理解', detail: '等待多模态模型读取原图。', status: 'pending' },
           { key: 'visual_review', title: '人工审核', detail: '等待确认商品外观、材质、文字和保真约束。', status: 'pending' }
@@ -210,6 +250,7 @@ export const useProjectStore = defineStore('project', {
         title: '正在生成创意方向',
         percent: 6,
         message: '准备保存人工审核并继续后续 Agent 工作流。',
+        startedAt: new Date().toISOString(),
         items: [
           { key: 'visual_review', title: '人工审核', detail: '等待保存修正和审核意见。', status: 'running' },
           { key: 'analysis', title: '商品策略', detail: '等待结合商品信息生成策略。', status: 'pending' },
@@ -224,6 +265,7 @@ export const useProjectStore = defineStore('project', {
         title: '正在生成素材包',
         percent: 6,
         message: `已选择「${planName}」，准备生成图片、评分和文案。`,
+        startedAt: new Date().toISOString(),
         items: [
           { key: 'prompt', title: 'Prompt Pack', detail: '等待构建生图提示词和保真约束。', status: 'running' },
           { key: 'images', title: '素材生成', detail: '等待提交真实图片生成任务。', status: 'pending' },
@@ -232,16 +274,16 @@ export const useProjectStore = defineStore('project', {
         ]
       }
     },
-    beginProjectPolling(projectId: number) {
+    beginProjectPolling(projectId: number, stopWhenSettled = false) {
       let refreshing = false
       const timer = window.setInterval(async () => {
         if (refreshing) return
         refreshing = true
         try {
-          const project = await getProject(projectId)
-          this.current = project
-          this.syncSteps()
-          this.syncGenerationProgressFromEvents()
+          await this.refresh(projectId)
+          if (stopWhenSettled && !this.hasRunningWorkflowEvent) {
+            window.clearInterval(timer)
+          }
         } catch {
           // The active generation request will surface the actionable error.
         } finally {
@@ -322,6 +364,7 @@ export const useProjectStore = defineStore('project', {
       this.progress.percent = 0
       this.progress.title = ''
       this.progress.message = ''
+      this.progress.startedAt = null
       this.progress.items = []
     },
     markRunningProgressFailed() {
@@ -349,6 +392,15 @@ export const useProjectStore = defineStore('project', {
       const done = rank[status || 'draft'] || 0
       this.steps.forEach((step, index) => {
         step.status = index < done ? 'success' : 'pending'
+      })
+
+      this.steps.forEach((step) => {
+        if (step.status === 'success') return
+        const event = this.latestEventsByStep[step.key]
+        if (!event) return
+        if (event.status === 'running' || event.status === 'failed' || event.status === 'success') {
+          step.status = event.status
+        }
       })
     }
   }

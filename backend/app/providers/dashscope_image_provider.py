@@ -23,6 +23,7 @@ class DashscopeImageProvider:
         self.model = settings.dashscope_image_model
         self.base_url = self._base_api_url(settings.dashscope_image_generation_url)
         self.generation_url = f"{self.base_url}/services/aigc/image-generation/generation"
+        self.synchronous_generation_url = f"{self.base_url}/services/aigc/multimodal-generation/generation"
         self.poll_interval_seconds = 2
         self.max_poll_attempts = max(1, int(settings.model_request_timeout // self.poll_interval_seconds))
 
@@ -82,11 +83,23 @@ class DashscopeImageProvider:
         count: int,
         source_image_path: str | None = None,
     ) -> list[str]:
-        prompt_text = f"{positive_prompt}\n\nNegative constraints: {negative_prompt}"
+        prompt_text = positive_prompt if self._uses_synchronous_generation() else f"{positive_prompt}\n\nNegative constraints: {negative_prompt}"
         content = [{"text": prompt_text}]
         source_reference = self._source_image_reference(source_image_path)
         if source_reference:
             content.insert(0, {"image": source_reference})
+
+        if self._uses_synchronous_generation():
+            response = self._request_synchronous_images(
+                content=content,
+                negative_prompt=negative_prompt,
+                size=size,
+                count=count,
+            )
+            images = self._extract_image_urls(response)
+            if not images:
+                raise ProviderRequestError(f"DashScope image response did not include generated image URLs: {response}")
+            return images
 
         payload = {
             "model": self.model,
@@ -108,6 +121,50 @@ class DashscopeImageProvider:
         if not images:
             raise ProviderRequestError(f"DashScope image response did not include generated image URLs: {response}")
         return images
+
+    def _request_synchronous_images(
+        self,
+        *,
+        content: list[dict[str, str]],
+        negative_prompt: str,
+        size: str,
+        count: int,
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "input": {"messages": [{"role": "user", "content": content}]},
+            "parameters": {
+                "negative_prompt": negative_prompt,
+                "prompt_extend": True,
+                "watermark": False,
+                "size": size,
+                "n": count,
+            },
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = httpx.post(
+                self.synchronous_generation_url,
+                headers=headers,
+                json=payload,
+                timeout=settings.model_request_timeout,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ProviderRequestError(f"DashScope synchronous image generation failed: {self._dashscope_error(exc.response)}") from exc
+        except httpx.HTTPError as exc:
+            raise ProviderRequestError(f"DashScope synchronous image generation failed: {exc}") from exc
+
+        data = response.json()
+        if self._get(data, "code"):
+            raise ProviderRequestError(f"DashScope synchronous image generation failed: {self._dashscope_error(data)}")
+        return data
+
+    def _uses_synchronous_generation(self) -> bool:
+        return self.model.lower().startswith("qwen-image")
 
     def _source_image_reference(self, source_image_path: str | None) -> str | None:
         if not source_image_path:
@@ -234,6 +291,8 @@ class DashscopeImageProvider:
         target.write_bytes(response.content)
 
     def _dashscope_size(self, size: str) -> str:
+        if self._uses_synchronous_generation():
+            return size.lower().replace("x", "*")
         return "2K"
 
     def _parse_size(self, size: str) -> tuple[int | None, int | None]:

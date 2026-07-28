@@ -29,7 +29,9 @@ uvicorn app.main:app --reload
 - `OPENAI_API_KEY`、`DASHSCOPE_API_KEY`：对应平台的密钥，只从系统环境变量读取。
 - `OPENAI_BASE_URL`、`DASHSCOPE_BASE_HTTP_API_URL`：可选 Base URL，默认分别为 OpenAI 与百炼公开地址。
 - `OPENAI_TEXT_MODEL`、`OPENAI_IMAGE_MODEL`：OpenAI 的文字和图片模型 ID。
-- `DASHSCOPE_TEXT_MODEL`、`DASHSCOPE_IMAGE_MODEL`：百炼的文字和图片模型 ID；`TEXT_MODEL` 仅作为旧版百炼文字配置兼容项。
+- `DASHSCOPE_TEXT_MODEL`：百炼普通文字推理模型 ID；`TEXT_MODEL` 仅作为旧版配置兼容项。
+- `DASHSCOPE_VISION_MODEL`：百炼图片理解与图片评分使用的多模态模型 ID，必须支持 `MultiModalConversation`。
+- `DASHSCOPE_IMAGE_MODEL`：百炼图片生成模型 ID。
 - `DASHSCOPE_API_KEY`：百炼 API Key，只从系统环境变量读取，不要写入代码或提交到仓库。
 - `DASHSCOPE_BASE_HTTP_API_URL`：百炼 SDK base URL，默认 `https://dashscope.aliyuncs.com/api/v1`。
 - `DASHSCOPE_TEXT_BASE_URL`：兼容旧配置名；未设置 `DASHSCOPE_BASE_HTTP_API_URL` 时会作为 SDK base URL 使用。
@@ -43,6 +45,7 @@ uvicorn app.main:app --reload
 export TEXT_PROVIDER=dashscope
 export IMAGE_PROVIDER=dashscope
 export DASHSCOPE_TEXT_MODEL=your_text_model
+export DASHSCOPE_VISION_MODEL=your_multimodal_model
 export DASHSCOPE_IMAGE_MODEL=your_image_model
 export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 ```

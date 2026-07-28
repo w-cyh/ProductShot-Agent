@@ -23,6 +23,7 @@ class Settings:
         os.getenv("DASHSCOPE_TEXT_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"),
     )
     dashscope_text_model = os.getenv("DASHSCOPE_TEXT_MODEL", os.getenv("TEXT_MODEL", ""))
+    dashscope_vision_model = os.getenv("DASHSCOPE_VISION_MODEL", "")
     dashscope_image_model = os.getenv("DASHSCOPE_IMAGE_MODEL", "")
     dashscope_image_generation_url = dashscope_base_http_api_url
     model_request_timeout = float(os.getenv("MODEL_REQUEST_TIMEOUT", "180"))

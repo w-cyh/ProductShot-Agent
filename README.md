@@ -179,7 +179,7 @@ Agent 设计原则：
 关键处理：
 
 1. 图片 Provider 声明 `capabilities`，当 Prompt 要求图生图但 Provider 不支持时，后端会明确报错。
-2. DashScope 图片生成采用异步任务创建、轮询、下载落盘的方式，避免把外部模型状态隐藏在前端。
+2. DashScope 图片生成按模型能力选择调用方式：Qwen-Image 使用同步多模态端点，Wan 等模型使用异步任务创建与轮询；生成结果都会立即下载落盘。
 3. API Key 只从后端环境变量读取，前端模型管理页不保存 secret。
 
 ## 8. Memory 设计
@@ -268,6 +268,7 @@ npm run dev
 export TEXT_PROVIDER=dashscope
 export IMAGE_PROVIDER=dashscope
 export DASHSCOPE_TEXT_MODEL=your_text_model
+export DASHSCOPE_VISION_MODEL=your_multimodal_model
 export DASHSCOPE_IMAGE_MODEL=your_image_model
 export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 export DASHSCOPE_API_KEY=your_api_key

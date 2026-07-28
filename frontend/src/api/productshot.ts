@@ -215,6 +215,7 @@ export interface ModelSettings {
 
 export interface ProviderModelSettings {
   text_model: string
+  vision_model: string
   image_model: string
   base_url: string
   api_key_configured: boolean
@@ -226,7 +227,7 @@ export type ModelSettingsUpdate = Partial<
     | 'text_provider'
     | 'image_provider'
   >
-> & { providers?: Record<string, Partial<Pick<ProviderModelSettings, 'text_model' | 'image_model' | 'base_url'>>> }
+> & { providers?: Record<string, Partial<Pick<ProviderModelSettings, 'text_model' | 'vision_model' | 'image_model' | 'base_url'>>> }
 
 export interface ModelConnectionTest {
   provider: string

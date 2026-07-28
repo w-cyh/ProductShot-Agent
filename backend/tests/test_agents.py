@@ -8,7 +8,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.agents import ProductAnalysisAgent, VisualAnalysisAgent
-from app.api.routes import test_text_model_connection as run_text_model_connection_test
+from app.api.routes import (
+    _model_settings_read,
+    _update_provider_settings,
+    test_text_model_connection as run_text_model_connection_test,
+)
 from app.config import settings
 from app.database import Base
 from app.models import Project, WorkflowEvent
@@ -17,7 +21,7 @@ from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.dashscope_text_provider import DashscopeTextProvider
 from app.providers.openai_image_provider import OpenAIImageProvider
 from app.providers.openai_text_provider import OpenAITextProvider
-from app.providers.text_provider import ProviderConfigurationError
+from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
 from app.schemas import ProductAnalysisPayload, VisualAnalysisPayload
 from app.services import ProductShotWorkflow
 
@@ -80,7 +84,49 @@ def test_dashscope_image_provider_requires_key_and_model(monkeypatch):
         DashscopeImageProvider().generate_images(project_id=1, source_image_path=None, positive_prompt="x", negative_prompt="y", size="1024x1024", count=1)
 
 
-def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
+def test_dashscope_text_provider_requires_vision_model(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_vision_model", "")
+    image = tmp_path / "source.png"
+    image.write_bytes(b"image")
+
+    with pytest.raises(ProviderConfigurationError, match="DASHSCOPE_VISION_MODEL.*multimodal"):
+        DashscopeTextProvider().generate_multimodal_json(
+            system_prompt="system",
+            user_prompt="user",
+            image_path=str(image),
+            schema_name="Test",
+            schema={},
+        )
+
+
+def test_dashscope_text_provider_uses_generation_sdk(monkeypatch):
+    calls = {}
+    dashscope_module = ModuleType("dashscope")
+    dashscope_module.base_http_api_url = ""
+
+    class FakeGeneration:
+        @staticmethod
+        def call(**kwargs):
+            calls.update(kwargs)
+            return SimpleNamespace(output=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=[{"text": '{"ok": true}'}]))]))
+
+    dashscope_module.Generation = FakeGeneration
+    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_workspace_id", "workspace-test")
+    provider = DashscopeTextProvider()
+    assert provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test", schema={"type": "object"}) == {"ok": True}
+    assert calls["model"] == "qwen-test"
+    assert calls["result_format"] == "message"
+    assert calls["workspace"] == "workspace-test"
+    assert calls["messages"][0]["role"] == "system"
+    assert calls["messages"][1] == {"role": "user", "content": "user"}
+
+
+def test_dashscope_text_provider_uses_multimodal_sdk_for_images(monkeypatch, tmp_path: Path):
     calls = {}
     dashscope_module = ModuleType("dashscope")
     dashscope_module.base_http_api_url = ""
@@ -94,10 +140,84 @@ def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
     dashscope_module.MultiModalConversation = FakeConversation
     monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
-    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-vl-test")
+    monkeypatch.setattr(settings, "dashscope_vision_model", "qwen3-vl-test")
+    monkeypatch.setattr(settings, "dashscope_workspace_id", None)
+    image = tmp_path / "source.png"
+    image.write_bytes(b"image")
+
     provider = DashscopeTextProvider()
-    assert provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test", schema={"type": "object"}) == {"ok": True}
-    assert calls["model"] == "qwen-test"
+    result = provider.generate_multimodal_json(
+        system_prompt="system",
+        user_prompt="user",
+        image_path=str(image),
+        schema_name="Test",
+        schema={"type": "object"},
+    )
+
+    assert result == {"ok": True}
+    assert calls["model"] == "qwen3-vl-test"
+    assert calls["messages"][0]["content"][0]["image"] == image.resolve().as_uri()
+    assert "workspace" not in calls
+
+
+def test_dashscope_multimodal_url_error_suggests_vision_model(monkeypatch, tmp_path: Path):
+    dashscope_module = ModuleType("dashscope")
+    dashscope_module.base_http_api_url = ""
+
+    class FakeConversation:
+        @staticmethod
+        def call(**_kwargs):
+            return SimpleNamespace(
+                status_code=400,
+                request_id="request-test",
+                code="InvalidParameter",
+                message="url error, please check url",
+                output=None,
+            )
+
+    dashscope_module.MultiModalConversation = FakeConversation
+    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_vision_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_workspace_id", None)
+    image = tmp_path / "source.png"
+    image.write_bytes(b"image")
+
+    with pytest.raises(ProviderRequestError, match="DASHSCOPE_VISION_MODEL.*multimodal"):
+        DashscopeTextProvider().generate_multimodal_json(
+            system_prompt="system",
+            user_prompt="user",
+            image_path=str(image),
+            schema_name="Test",
+            schema={},
+        )
+
+
+def test_dashscope_text_provider_reports_sdk_error_details(monkeypatch):
+    dashscope_module = ModuleType("dashscope")
+    dashscope_module.base_http_api_url = ""
+
+    class FakeGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            return SimpleNamespace(
+                status_code=400,
+                request_id="request-test",
+                code="InvalidParameter",
+                message="url error",
+                output=None,
+            )
+
+    dashscope_module.Generation = FakeGeneration
+    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_text_model", "qwen-test")
+    monkeypatch.setattr(settings, "dashscope_workspace_id", None)
+
+    with pytest.raises(ProviderRequestError, match="InvalidParameter.*url error.*request-test"):
+        DashscopeTextProvider().generate_json(system_prompt="system", user_prompt="user", schema_name="Test", schema={})
 
 
 def test_dashscope_image_provider_uses_async_generation(monkeypatch, tmp_path: Path):
@@ -126,6 +246,58 @@ def test_dashscope_image_provider_uses_async_generation(monkeypatch, tmp_path: P
     assert len(results) == 1
     assert calls["post"][0].endswith("/services/aigc/image-generation/generation")
     assert calls["get"][0].endswith("/tasks/task-123")
+
+
+def test_dashscope_qwen_image_provider_uses_synchronous_generation(monkeypatch, tmp_path: Path):
+    calls = {}
+
+    def fake_post(url, **kwargs):
+        calls["post"] = (url, kwargs)
+        return FakeResponse(
+            {
+                "output": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"image": "https://example.com/image-1.png"},
+                                    {"image": "https://example.com/image-2.png"},
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+    def fake_download(self, _url, target):
+        target.write_bytes(b"image")
+
+    monkeypatch.setattr("app.providers.dashscope_image_provider.httpx.post", fake_post)
+    monkeypatch.setattr(DashscopeImageProvider, "_download_image", fake_download)
+    monkeypatch.setattr(settings, "generated_dir", tmp_path)
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "dashscope_image_model", "qwen-image-2.0-pro-test")
+    source = tmp_path / "source.png"
+    source.write_bytes(b"source")
+
+    results = DashscopeImageProvider().generate_images(
+        project_id=1,
+        source_image_path=str(source),
+        positive_prompt="prompt",
+        negative_prompt="negative",
+        size="1024x1024",
+        count=2,
+    )
+
+    request_url, request = calls["post"]
+    assert len(results) == 2
+    assert request_url.endswith("/services/aigc/multimodal-generation/generation")
+    assert "X-DashScope-Async" not in request["headers"]
+    assert request["json"]["parameters"]["negative_prompt"] == "negative"
+    assert request["json"]["parameters"]["size"] == "1024*1024"
+    assert request["json"]["parameters"]["n"] == 2
+    assert request["json"]["input"]["messages"][0]["content"][0]["image"].startswith("data:image/png;base64,")
 
 
 def test_openai_text_provider_uses_structured_responses(monkeypatch):
@@ -173,6 +345,15 @@ def test_connection_test_reports_unconfigured_provider(monkeypatch):
     assert result.status == "failed"
     assert result.provider == "unconfigured"
     assert "TEXT_PROVIDER" in result.message
+
+
+def test_model_settings_updates_dashscope_vision_model(monkeypatch):
+    monkeypatch.setattr(settings, "dashscope_vision_model", "")
+
+    _update_provider_settings("dashscope", {"vision_model": "qwen3-vl-test"})
+
+    assert settings.dashscope_vision_model == "qwen3-vl-test"
+    assert _model_settings_read().providers["dashscope"].vision_model == "qwen3-vl-test"
 
 
 def test_agents_do_not_fall_back_to_local_rules():

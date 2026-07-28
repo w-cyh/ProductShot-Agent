@@ -129,12 +129,14 @@ def _model_settings_read() -> ModelSettingsRead:
         providers={
             "openai": {
                 "text_model": settings.openai_text_model,
+                "vision_model": settings.openai_text_model,
                 "image_model": settings.openai_image_model,
                 "base_url": settings.openai_base_url,
                 "api_key_configured": bool(settings.openai_api_key),
             },
             "dashscope": {
                 "text_model": settings.dashscope_text_model,
+                "vision_model": settings.dashscope_vision_model,
                 "image_model": settings.dashscope_image_model,
                 "base_url": settings.dashscope_base_http_api_url,
                 "api_key_configured": bool(settings.dashscope_api_key),
@@ -157,6 +159,8 @@ def _update_provider_settings(provider_name: str, updates: dict[str, str]) -> No
         return
     if "text_model" in updates:
         settings.dashscope_text_model = updates["text_model"].strip()
+    if "vision_model" in updates:
+        settings.dashscope_vision_model = updates["vision_model"].strip()
     if "image_model" in updates:
         settings.dashscope_image_model = updates["image_model"].strip()
     if "base_url" in updates and updates["base_url"].strip():

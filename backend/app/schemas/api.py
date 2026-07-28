@@ -223,6 +223,7 @@ class RevisionRequest(BaseModel):
 
 class ProviderModelSettingsRead(BaseModel):
     text_model: str
+    vision_model: str
     image_model: str
     base_url: str
     api_key_configured: bool
@@ -230,6 +231,7 @@ class ProviderModelSettingsRead(BaseModel):
 
 class ProviderModelSettingsUpdate(BaseModel):
     text_model: Optional[str] = Field(default=None, max_length=120)
+    vision_model: Optional[str] = Field(default=None, max_length=120)
     image_model: Optional[str] = Field(default=None, max_length=120)
     base_url: Optional[str] = Field(default=None, max_length=300)
 

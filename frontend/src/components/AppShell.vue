@@ -16,6 +16,12 @@
           </el-icon>
           <span>新建项目</span>
         </RouterLink>
+
+        <RouterLink class="nav-link task-center-link" to="/tasks">
+          <el-icon :size="17"><Tickets /></el-icon>
+          <span>任务中心</span>
+          <b v-if="activeTaskCount">{{ activeTaskCount }}</b>
+        </RouterLink>
       </div>
 
       <section class="shell-history" aria-label="项目历史">
@@ -39,7 +45,7 @@
             :to="`/studio/${project.id}`"
           >
             <strong>{{ project.product_name }}</strong>
-            <span>{{ project.target_platform }} · {{ statusLabel(project.status) }}</span>
+            <span>{{ project.source_confirmed_at ? '原图已确认' : '待确认原图' }} · {{ statusLabel(project.status) }}</span>
           </RouterLink>
         </div>
         <p v-else-if="projectsLoading" class="shell-muted">正在加载项目...</p>
@@ -80,6 +86,11 @@
       </div>
       <div v-show="mobileNavOpen" class="mobile-menu-panel">
         <RouterLink class="new-project-link" to="/studio">新建项目</RouterLink>
+        <RouterLink class="nav-link task-center-link" to="/tasks">
+          <el-icon :size="18"><Tickets /></el-icon>
+          <span>任务中心</span>
+          <b v-if="activeTaskCount">{{ activeTaskCount }}</b>
+        </RouterLink>
         <RouterLink class="nav-link" to="/model-settings">
           <el-icon :size="18">
             <Setting />
@@ -107,7 +118,7 @@
               :to="`/studio/${project.id}`"
             >
               <strong>{{ project.product_name }}</strong>
-              <span>{{ project.target_platform }} · {{ statusLabel(project.status) }}</span>
+              <span>{{ project.source_confirmed_at ? '原图已确认' : '待确认原图' }} · {{ statusLabel(project.status) }}</span>
             </RouterLink>
           </div>
           <p v-else-if="projectsLoading" class="shell-muted">正在加载项目...</p>
@@ -123,24 +134,34 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Close, Menu, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { Close, Menu, Plus, Refresh, Setting, Tickets } from '@element-plus/icons-vue'
 import { errorMessage } from '../api/client'
-import { listProjects, type Project } from '../api/productshot'
+import { listGenerationTasks, listProjects, type Project } from '../api/productshot'
 
 const route = useRoute()
 const mobileNavOpen = ref(false)
 const projects = ref<Project[]>([])
 const projectsLoading = ref(false)
 const projectError = ref('')
+const activeTaskCount = ref(0)
+let taskCountTimer: ReturnType<typeof window.setInterval> | null = null
 
 const currentProjectId = computed(() => {
   const value = route.params.id
   return typeof value === 'string' ? Number(value) : 0
 })
 
-onMounted(loadProjects)
+onMounted(() => {
+  loadProjects()
+  loadTaskCount()
+  taskCountTimer = window.setInterval(loadTaskCount, 5000)
+})
+
+onBeforeUnmount(() => {
+  if (taskCountTimer) window.clearInterval(taskCountTimer)
+})
 
 watch(
   () => route.fullPath,
@@ -159,6 +180,15 @@ async function loadProjects() {
     projectError.value = errorMessage(error)
   } finally {
     projectsLoading.value = false
+  }
+}
+
+async function loadTaskCount() {
+  try {
+    const result = await listGenerationTasks('active', 1, 1)
+    activeTaskCount.value = result.total
+  } catch {
+    activeTaskCount.value = 0
   }
 }
 

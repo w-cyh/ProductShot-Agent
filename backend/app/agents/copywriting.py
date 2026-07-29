@@ -30,11 +30,10 @@ class CopywritingAgent:
             user_prompt=json.dumps(
                 {
                     "project": {
-                        "product_name": project.product_name,
-                        "product_category": project.product_category,
-                        "core_selling_points": project.core_selling_points,
-                        "target_platform": project.target_platform,
-                        "target_audience": project.target_audience,
+                    "product_name": project.product_name,
+                    "product_category": project.product_category,
+                    "core_selling_points": project.core_selling_points,
+                    "target_audience": project.target_audience,
                     },
                     "plan": plan.model_dump(),
                     "review": review.model_dump() if review else None,
@@ -46,3 +45,32 @@ class CopywritingAgent:
             temperature=0.6,
         )
         return model_payload
+
+    def rewrite(
+        self,
+        project: Project,
+        current_copy: CopywritingPayload,
+        instruction: str,
+    ) -> CopywritingPayload:
+        return generate_payload(
+            provider=self.text_provider,
+            payload_type=CopywritingPayload,
+            system_prompt=(
+                "You are a Chinese ecommerce copywriter. Revise the supplied copy according to the user's request. "
+                "Keep any content not affected by the request and avoid exaggerated or unverifiable claims."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "project": {
+                        "product_name": project.product_name,
+                        "product_category": project.product_category,
+                    },
+                    "current_copy": current_copy.model_dump(),
+                    "revision_instruction": instruction.strip(),
+                    "required_fields": CopywritingPayload.model_json_schema(),
+                },
+                ensure_ascii=False,
+            ),
+            schema_name="CopywritingPayload",
+            temperature=0.45,
+        )

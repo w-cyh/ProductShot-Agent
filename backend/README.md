@@ -1,6 +1,6 @@
 # ProductShot Agent Backend
 
-FastAPI 后端，提供项目管理、图片上传、原图视觉理解、3 个创意方向规划、选中方向生成素材包、评分、文案、修改和导出 API。
+FastAPI 后端，提供商品与原图确认、自然语言原图纠正、创意方向规划、按方向图片生成、评分和当前文案 API。
 
 ## 安装
 
@@ -56,6 +56,11 @@ export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 
 ## 主要工作流接口
 
-- `POST /api/projects/{project_id}/agent/plan`：执行原图理解、商品策略和 3 个创意方向生成，不创建图片任务。
-- `GET /api/projects/{project_id}/creative-plans`：获取用户可选择的 3 个方向。
-- `POST /api/projects/{project_id}/creative-plans/{plan_id}/generate-pack`：只基于选中方向生成图片、评分、推荐图和配套文案。
+- `PATCH /api/projects/{project_id}`、`PUT /api/projects/{project_id}/primary-asset`：只在来源确认前更新商品与主图。
+- `POST /api/projects/{project_id}/confirm-source`：确认并锁定商品事实与原图。
+- `POST /api/projects/{project_id}/agent/visual-analysis/corrections`、`.../confirm`：自然语言纠正并确认原图理解。
+- `POST /api/projects/{project_id}/agent/analyze`：在理解确认后生成商品策略，不自动生成创意方向。
+- `POST /api/projects/{project_id}/creative-plan-batches`：按可选平台、风格与反馈生成 3 个方向。
+- `POST /api/projects/{project_id}/creative-plans/{plan_id}/prompt-packs`：仅在用户决定出图时创建 Prompt Pack。
+- `POST /api/projects/{project_id}/prompt-packs/{prompt_pack_id}/generation-tasks`：提交按方向/轮次隔离的出图任务。
+- `PUT /api/projects/{project_id}/copywriting/{copywriting_id}`：更新该交付图的当前文案稿。

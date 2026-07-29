@@ -5,10 +5,9 @@ export interface Project {
   product_name: string
   product_category?: string | null
   core_selling_points?: string | null
-  target_platform: string
   target_audience?: string | null
-  preferred_style?: string | null
   status: string
+  source_confirmed_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -17,9 +16,7 @@ export interface ProjectCreate {
   product_name: string
   product_category?: string
   core_selling_points?: string
-  target_platform: string
   target_audience?: string
-  preferred_style?: string
 }
 
 export interface ProductAsset {
@@ -60,11 +57,6 @@ export interface VisualAnalysis {
   human_review_notes: string
 }
 
-export interface VisualAnalysisReviewRequest {
-  analysis: VisualAnalysis
-  review_notes: string
-}
-
 export interface ProductVisualAnalysisRead {
   id: number
   project_id: number
@@ -94,13 +86,29 @@ export interface CreativePlanPayload {
 export interface CreativePlan {
   id: number
   project_id: number
+  plan_batch_id?: number | null
+  parent_plan_id?: number | null
+  version: number
   plan_name: string
   plan_description: string
   target_platform: string
   visual_style: string
   selling_angle: string
+  is_current: boolean
   plan: CreativePlanPayload
   created_at: string
+}
+
+export interface CreativePlanBatch {
+  id: number
+  project_id: number
+  kind: string
+  feedback: string
+  platforms: string[]
+  style_presets: string[]
+  source_plan_id?: number | null
+  created_at: string
+  plans: CreativePlan[]
 }
 
 export interface PromptPayload {
@@ -118,17 +126,55 @@ export interface PromptPackPayload extends PromptPayload {
   consistency_rules: string[]
 }
 
+export interface PromptPack {
+  id: number
+  project_id: number
+  plan_id: number
+  parent_image_id?: number | null
+  source_instruction: string
+  prompt: PromptPackPayload
+  created_at: string
+}
+
 export interface GenerationTask {
   id: number
   project_id: number
   plan_id?: number | null
+  prompt_pack_id?: number | null
+  parent_image_id?: number | null
+  iteration: number
+  requested_count: number
+  generated_count: number
+  reviewed_count: number
+  progress_stage: string
   prompt: string
   negative_prompt: string
   model_name: string
   status: string
   error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface GenerationTaskDetail {
+  task: GenerationTask
+  prompt_pack?: PromptPack | null
+  images: GeneratedImage[]
+}
+
+export interface GenerationTaskCenterItem extends GenerationTask {
+  project_name: string
+  plan_name?: string | null
+  parent_image_label?: string | null
+}
+
+export interface GenerationTaskPage {
+  items: GenerationTaskCenterItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface GeneratedImage {
@@ -146,6 +192,7 @@ export interface GeneratedImage {
   score?: number | null
   is_selected: boolean
   is_recommended: boolean
+  review?: ImageReviewRead | null
   created_at: string
 }
 
@@ -183,7 +230,7 @@ export interface CopywritingPayload {
   xiaohongshu_text: string
   moments_text: string
   taobao_text: string
-  douyin_script: string
+  xianyu_text: string
   tags: string[]
 }
 
@@ -193,15 +240,6 @@ export interface CopywritingRead {
   image_id?: number | null
   copywriting: CopywritingPayload
   created_at: string
-}
-
-export interface RevisionResponse {
-  revision_type: string
-  target: string
-  modification_plan: string[]
-  new_prompt: PromptPayload
-  should_regenerate: boolean
-  notes: string
 }
 
 export interface ModelSettings {
@@ -258,8 +296,12 @@ export interface ProjectDetail extends Project {
   product_strategy?: ProductAnalysisRead | null
   latest_analysis?: ProductAnalysisRead | null
   creative_plans: CreativePlan[]
+  creative_plan_batches: CreativePlanBatch[]
+  prompt_packs: PromptPack[]
+  generation_tasks: GenerationTask[]
   generated_images: GeneratedImage[]
   latest_copywriting?: CopywritingRead | null
+  copywriting: CopywritingRead[]
   workflow_events: WorkflowEvent[]
 }
 
@@ -268,8 +310,20 @@ export async function createProject(payload: ProjectCreate) {
   return data
 }
 
+export async function updateProject(projectId: number, payload: ProjectCreate) {
+  const { data } = await http.patch<Project>(`/api/projects/${projectId}`, payload)
+  return data
+}
+
 export async function listProjects() {
   const { data } = await http.get<Project[]>('/api/projects')
+  return data
+}
+
+export async function listGenerationTasks(status = 'active', page = 1, pageSize = 20) {
+  const { data } = await http.get<GenerationTaskPage>('/api/generation-tasks', {
+    params: { status, page, page_size: pageSize }
+  })
   return data
 }
 
@@ -287,6 +341,20 @@ export async function uploadAsset(projectId: number, file: File) {
   return data
 }
 
+export async function replacePrimaryAsset(projectId: number, file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await http.put<ProductAsset>(`/api/projects/${projectId}/primary-asset`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+  return data
+}
+
+export async function confirmSource(projectId: number) {
+  const { data } = await http.post<Project>(`/api/projects/${projectId}/confirm-source`)
+  return data
+}
+
 export async function analyzeProject(projectId: number) {
   const { data } = await http.post<ProductAnalysisRead>(`/api/projects/${projectId}/agent/analyze`)
   return data
@@ -297,21 +365,29 @@ export async function ensureVisualAnalysis(projectId: number) {
   return data
 }
 
-export async function reviewVisualAnalysis(projectId: number, payload: VisualAnalysisReviewRequest) {
-  const { data } = await http.put<ProductVisualAnalysisRead>(
-    `/api/projects/${projectId}/agent/visual-analysis/review`,
-    payload
+export async function correctVisualAnalysis(projectId: number, instruction: string) {
+  const { data } = await http.post<ProductVisualAnalysisRead>(
+    `/api/projects/${projectId}/agent/visual-analysis/corrections`,
+    { instruction }
   )
   return data
 }
 
-export async function generatePlans(projectId: number) {
-  const { data } = await http.post<CreativePlan[]>(`/api/projects/${projectId}/agent/generate-plans`)
+export async function confirmVisualAnalysis(projectId: number) {
+  const { data } = await http.post<ProductVisualAnalysisRead>(`/api/projects/${projectId}/agent/visual-analysis/confirm`)
   return data
 }
 
-export async function planProject(projectId: number) {
-  const { data } = await http.post<CreativePlan[]>(`/api/projects/${projectId}/agent/plan`)
+export async function refreshCreativePlans(
+  projectId: number,
+  payload: { feedback?: string; platforms?: string[]; style_presets?: string[] } = {}
+) {
+  const { data } = await http.post<CreativePlanBatch>(`/api/projects/${projectId}/creative-plan-batches`, payload)
+  return data
+}
+
+export async function reviseCreativePlan(projectId: number, planId: number, instruction: string) {
+  const { data } = await http.post<CreativePlan>(`/api/projects/${projectId}/creative-plans/${planId}/revisions`, { instruction })
   return data
 }
 
@@ -320,24 +396,38 @@ export async function listPlans(projectId: number) {
   return data
 }
 
-export async function generateImages(projectId: number, planId: number, count = 4) {
-  const { data } = await http.post<GeneratedImagesResponse>(
-    `/api/projects/${projectId}/creative-plans/${planId}/generate-images`,
-    { count }
-  )
+export async function createPlanPromptPack(projectId: number, planId: number, instruction = '') {
+  const { data } = await http.post<PromptPack>(`/api/projects/${projectId}/creative-plans/${planId}/prompt-packs`, { instruction })
   return data
 }
 
-export async function generatePack(projectId: number, planId: number, count = 4) {
-  const { data } = await http.post<GeneratedImagesResponse>(
-    `/api/projects/${projectId}/creative-plans/${planId}/generate-pack`,
-    { count }
-  )
+export async function createImagePromptPack(projectId: number, imageId: number, instruction: string) {
+  const { data } = await http.post<PromptPack>(`/api/projects/${projectId}/generated-images/${imageId}/prompt-packs`, { instruction })
+  return data
+}
+
+export async function submitGenerationTask(projectId: number, promptPackId: number, count = 2) {
+  const { data } = await http.post<GenerationTask>(`/api/projects/${projectId}/prompt-packs/${promptPackId}/generation-tasks`, { count })
+  return data
+}
+
+export async function getGenerationTask(projectId: number, taskId: number) {
+  const { data } = await http.get<GenerationTaskDetail>(`/api/projects/${projectId}/generation-tasks/${taskId}`)
+  return data
+}
+
+export async function retryGenerationTask(projectId: number, taskId: number) {
+  const { data } = await http.post<GenerationTask>(`/api/projects/${projectId}/generation-tasks/${taskId}/retry`)
   return data
 }
 
 export async function reviewImage(projectId: number, imageId: number) {
   const { data } = await http.post<ImageReviewRead>(`/api/projects/${projectId}/generated-images/${imageId}/review`)
+  return data
+}
+
+export async function selectGeneratedImage(projectId: number, imageId: number) {
+  const { data } = await http.post<GeneratedImage>(`/api/projects/${projectId}/generated-images/${imageId}/select`, { selected: true })
   return data
 }
 
@@ -348,11 +438,13 @@ export async function createCopywriting(projectId: number, imageId?: number) {
   return data
 }
 
-export async function reviseProject(projectId: number, instruction: string, imageId?: number) {
-  const { data } = await http.post<RevisionResponse>(`/api/projects/${projectId}/revise`, {
-    target_image_id: imageId,
-    instruction
-  })
+export async function updateCopywriting(projectId: number, copywritingId: number, copywriting: CopywritingPayload) {
+  const { data } = await http.put<CopywritingRead>(`/api/projects/${projectId}/copywriting/${copywritingId}`, { copywriting })
+  return data
+}
+
+export async function rewriteCopywriting(projectId: number, copywritingId: number, instruction: string) {
+  const { data } = await http.post<CopywritingRead>(`/api/projects/${projectId}/copywriting/${copywritingId}/rewrite`, { instruction })
   return data
 }
 
@@ -369,12 +461,4 @@ export async function updateModelSettings(payload: ModelSettingsUpdate) {
 export async function testTextModelConnection() {
   const { data } = await http.post<ModelConnectionTest>('/api/model-settings/test-text')
   return data
-}
-
-export function markdownExportUrl(projectId: number) {
-  return `${http.defaults.baseURL}/api/projects/${projectId}/export/markdown`
-}
-
-export function jsonExportUrl(projectId: number) {
-  return `${http.defaults.baseURL}/api/projects/${projectId}/export/json`
 }

@@ -197,6 +197,24 @@ select {
   background: var(--ps-primary-soft);
 }
 
+.task-center-link {
+  margin-top: 10px;
+}
+
+.task-center-link b {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 5px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--ps-primary);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+}
+
 .shell-history {
   display: grid;
   min-height: 0;

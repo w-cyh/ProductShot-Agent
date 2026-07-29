@@ -23,6 +23,7 @@ class Project(Base):
     target_platform: Mapped[str] = mapped_column(String(80), nullable=False)
     target_audience: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
     preferred_style: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    source_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
@@ -30,7 +31,9 @@ class Project(Base):
     assets: Mapped[list["ProductAsset"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     analyses: Mapped[list["ProductAnalysis"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     visual_analyses: Mapped[list["ProductVisualAnalysis"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    creative_plan_batches: Mapped[list["CreativePlanBatch"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     creative_plans: Mapped[list["CreativePlan"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    prompt_packs: Mapped[list["PromptPack"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     generation_tasks: Mapped[list["GenerationTask"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     generated_images: Mapped[list["GeneratedImage"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     copywriting_items: Mapped[list["Copywriting"]] = relationship(cascade="all, delete-orphan", back_populates="project")
@@ -75,21 +78,60 @@ class ProductVisualAnalysis(Base):
     project: Mapped[Project] = relationship(back_populates="visual_analyses")
 
 
+class CreativePlanBatch(Base):
+    __tablename__ = "creative_plan_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(40), default="initial", nullable=False)
+    feedback: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    platforms_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    style_presets_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    source_plan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("creative_plans.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="creative_plan_batches")
+    plans: Mapped[list["CreativePlan"]] = relationship(foreign_keys="CreativePlan.plan_batch_id", back_populates="batch")
+
+
 class CreativePlan(Base):
     __tablename__ = "creative_plans"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    plan_batch_id: Mapped[Optional[int]] = mapped_column(ForeignKey("creative_plan_batches.id"), nullable=True, index=True)
+    parent_plan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("creative_plans.id"), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     plan_name: Mapped[str] = mapped_column(String(160), nullable=False)
     plan_description: Mapped[str] = mapped_column(Text, nullable=False)
     target_platform: Mapped[str] = mapped_column(String(80), nullable=False)
     visual_style: Mapped[str] = mapped_column(String(160), nullable=False)
     selling_angle: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     plan_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="creative_plans")
+    batch: Mapped[Optional[CreativePlanBatch]] = relationship(foreign_keys=[plan_batch_id], back_populates="plans")
     generation_tasks: Mapped[list["GenerationTask"]] = relationship(cascade="all, delete-orphan", back_populates="plan")
+    prompt_packs: Mapped[list["PromptPack"]] = relationship(cascade="all, delete-orphan", back_populates="plan")
+
+
+class PromptPack(Base):
+    __tablename__ = "prompt_packs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("creative_plans.id"), nullable=False, index=True)
+    parent_image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_instruction: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="prompt_packs")
+    plan: Mapped[CreativePlan] = relationship(back_populates="prompt_packs")
+    parent_image: Mapped[Optional["GeneratedImage"]] = relationship(foreign_keys=[parent_image_id])
+    generation_tasks: Mapped[list["GenerationTask"]] = relationship(back_populates="prompt_pack")
 
 
 class GenerationTask(Base):
@@ -98,17 +140,32 @@ class GenerationTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     plan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("creative_plans.id"), nullable=True, index=True)
+    prompt_pack_id: Mapped[Optional[int]] = mapped_column(ForeignKey("prompt_packs.id"), nullable=True, index=True)
+    parent_image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    requested_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    generated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reviewed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    progress_stage: Mapped[str] = mapped_column(String(40), default="queued", nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     negative_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model_name: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="generation_tasks")
     plan: Mapped[Optional[CreativePlan]] = relationship(back_populates="generation_tasks")
-    images: Mapped[list["GeneratedImage"]] = relationship(cascade="all, delete-orphan", back_populates="task")
+    prompt_pack: Mapped[Optional[PromptPack]] = relationship(back_populates="generation_tasks")
+    parent_image: Mapped[Optional["GeneratedImage"]] = relationship(foreign_keys=[parent_image_id])
+    images: Mapped[list["GeneratedImage"]] = relationship(
+        foreign_keys="GeneratedImage.task_id",
+        cascade="all, delete-orphan",
+        back_populates="task",
+    )
 
 
 class GeneratedImage(Base):
@@ -131,7 +188,7 @@ class GeneratedImage(Base):
     is_recommended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
-    task: Mapped[GenerationTask] = relationship(back_populates="images")
+    task: Mapped[GenerationTask] = relationship(foreign_keys=[task_id], back_populates="images")
     project: Mapped[Project] = relationship(back_populates="generated_images")
     reviews: Mapped[list["ImageReview"]] = relationship(cascade="all, delete-orphan", back_populates="image")
     copywriting_items: Mapped[list["Copywriting"]] = relationship(cascade="all, delete-orphan", back_populates="image")
@@ -164,6 +221,10 @@ class Copywriting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    parent_copywriting_id: Mapped[Optional[int]] = mapped_column(ForeignKey("copywriting.id"), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    revision_kind: Mapped[str] = mapped_column(String(40), default="generated", nullable=False)
+    revision_instruction: Mapped[str] = mapped_column(Text, default="", nullable=False)
     title: Mapped[str] = mapped_column(String(220), nullable=False)
     selling_points_json: Mapped[str] = mapped_column(Text, nullable=False)
     xiaohongshu_title: Mapped[str] = mapped_column(String(220), nullable=False)
@@ -171,6 +232,7 @@ class Copywriting(Base):
     moments_text: Mapped[str] = mapped_column(Text, nullable=False)
     taobao_text: Mapped[str] = mapped_column(Text, nullable=False)
     douyin_script: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    xianyu_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     tags_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 

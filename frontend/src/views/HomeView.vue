@@ -36,7 +36,7 @@
             @click="$router.push(`/studio/${project.id}`)"
           >
             <strong>{{ project.product_name }}</strong>
-            <span>{{ project.target_platform }} · {{ statusLabel(project.status) }}</span>
+            <span>{{ project.source_confirmed_at ? '原图已确认' : '待确认原图' }} · {{ statusLabel(project.status) }}</span>
           </button>
         </div>
         <el-empty v-else-if="!loading" description="暂无项目，先创建一个商品素材任务" />

@@ -1,45 +1,13 @@
-from __future__ import annotations
+"""Retired direct-prompt revision entry point.
 
-import json
-
-from app.agents.llm import generate_payload
-from app.agents.prompt_engineer import PromptEngineerAgent
-from app.models import Project
-from app.providers import TextProvider, get_text_provider
-from app.schemas import CreativePlanPayload, PromptPackPayload, RevisionResponse
+Creative-direction revisions are now handled by ``CreativePlannerAgent`` and
+image iterations create a fresh Prompt Pack only when the user starts a new
+generation task.  This module remains as an explicit guard for local code that
+may still import the old class; it is not exported by ``app.agents`` or exposed
+by an API route.
+"""
 
 
 class RevisionAgent:
-    """Classifies natural-language revision intent and creates the next action plan."""
-
-    def __init__(self, text_provider: TextProvider | None = None) -> None:
-        self.text_provider = text_provider or get_text_provider()
-        self.prompt_agent = PromptEngineerAgent(self.text_provider)
-
-    def run(self, project: Project, plan: CreativePlanPayload, instruction: str) -> RevisionResponse:
-        base_prompt = self.prompt_agent.run(project, plan)
-        model_payload = generate_payload(
-            provider=self.text_provider,
-            payload_type=RevisionResponse,
-            system_prompt=(
-                "You are an agent workflow controller. Classify the user's revision request and decide "
-                "whether image regeneration is needed. Return a practical modification plan."
-            ),
-            user_prompt=json.dumps(
-                {
-                    "project": {
-                        "product_name": project.product_name,
-                        "target_platform": project.target_platform,
-                    },
-                    "plan": plan.model_dump(),
-                    "current_prompt": base_prompt.model_dump(),
-                    "instruction": instruction,
-                    "allowed_revision_types": ["copywriting", "platform", "prompt", "style", "creative_plan", "image"],
-                    "required_fields": RevisionResponse.model_json_schema(),
-                },
-                ensure_ascii=False,
-            ),
-            schema_name="RevisionResponse",
-            temperature=0.25,
-        )
-        return model_payload
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise RuntimeError("RevisionAgent 已移除；请改用创意方向修订或基于图片的迭代生成。")

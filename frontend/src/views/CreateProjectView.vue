@@ -4,7 +4,7 @@
       <div>
         <span class="eyebrow">New Brief</span>
         <h1 class="page-title">创建商品营销项目</h1>
-        <p class="page-description">填写商品信息并上传原图，后续 Agent 会自动完成分析、创意、生成和文案。</p>
+        <p class="page-description">商品与原图确认后，再按阶段完成理解、策略、创意、生成和文案。</p>
       </div>
     </div>
 
@@ -27,23 +27,6 @@
             placeholder="手工制作、香味舒缓、适合作为礼物"
           />
         </el-form-item>
-        <div class="form-grid">
-          <el-form-item label="目标平台">
-            <el-select v-model="form.target_platform">
-              <el-option label="小红书" value="小红书" />
-              <el-option label="朋友圈" value="朋友圈" />
-              <el-option label="淘宝" value="淘宝" />
-              <el-option label="抖音" value="抖音" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="风格偏好">
-            <el-select v-model="form.preferred_style">
-              <el-option label="小红书生活方式风" value="小红书生活方式风" />
-              <el-option label="高级极简白底风" value="高级极简白底风" />
-              <el-option label="节日礼物促销风" value="节日礼物促销风" />
-            </el-select>
-          </el-form-item>
-        </div>
         <el-form-item label="目标人群">
           <el-input v-model="form.target_audience" placeholder="例如：年轻女性、租房独居人群、礼物购买者" />
         </el-form-item>
@@ -112,9 +95,7 @@ const form = reactive({
   product_name: '',
   product_category: '',
   core_selling_points: '',
-  target_platform: '小红书',
-  target_audience: '',
-  preferred_style: '小红书生活方式风'
+  target_audience: ''
 })
 
 function handleFile(file: UploadFile) {

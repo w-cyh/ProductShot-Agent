@@ -1,5 +1,6 @@
 import base64
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -15,7 +16,7 @@ from app.api.routes import (
 )
 from app.config import settings
 from app.database import Base
-from app.models import Project, WorkflowEvent
+from app.models import ProductAsset, Project, WorkflowEvent
 from app.providers import get_text_provider
 from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.dashscope_text_provider import DashscopeTextProvider
@@ -363,7 +364,7 @@ def test_agents_do_not_fall_back_to_local_rules():
         ProductAnalysisAgent(FailingTextProvider()).run(sample_project())
 
 
-def test_workflow_records_failed_model_event(monkeypatch):
+def test_workflow_records_failed_model_event(monkeypatch, tmp_path: Path):
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
     monkeypatch.setattr("app.services.workflow.get_text_provider", lambda: FailingTextProvider())
@@ -371,9 +372,14 @@ def test_workflow_records_failed_model_event(monkeypatch):
         project = sample_project()
         project.id = None
         project.status = "draft"
+        project.source_confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.add(project)
         db.commit()
         db.refresh(project)
+        source = tmp_path / "source.png"
+        source.write_bytes(b"source")
+        db.add(ProductAsset(project_id=project.id, file_url="/uploads/source.png", file_path=str(source), file_type="image/png", is_primary=True))
+        db.commit()
         with pytest.raises(ProviderConfigurationError):
             ProductShotWorkflow(db).ensure_visual_analysis(project)
         event = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).one()

@@ -19,7 +19,9 @@
       </div>
       <el-table v-loading="loading" :data="projects" style="width: 100%">
         <el-table-column prop="product_name" label="商品名称" min-width="180" />
-        <el-table-column prop="target_platform" label="目标平台" width="120" />
+        <el-table-column label="原图状态" width="120">
+          <template #default="{ row }">{{ row.source_confirmed_at ? '已确认' : '待确认' }}</template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="130">
           <template #default="{ row }">
             <el-tag>{{ statusLabel(row.status) }}</el-tag>

@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue'
 import ProjectStudioView from '../views/ProjectStudioView.vue'
 import ModelSettingsView from '../views/ModelSettingsView.vue'
+import TaskCenterView from '../views/TaskCenterView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/plans/:id', redirect: (to) => `/studio/${to.params.id}` },
     { path: '/results/:id', redirect: (to) => `/studio/${to.params.id}` },
     { path: '/history', redirect: '/studio' },
+    { path: '/tasks', name: 'task-center', component: TaskCenterView },
     { path: '/model-settings', name: 'model-settings', component: ModelSettingsView }
   ]
 })

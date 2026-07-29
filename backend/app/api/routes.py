@@ -1,21 +1,39 @@
 from datetime import datetime, timezone
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.database import get_db
-from app.models import CreativePlan, GeneratedImage, GenerationTask, ProductAsset, Project, WorkflowEvent
+from app.models import (
+    Copywriting,
+    CreativePlan,
+    CreativePlanBatch,
+    GeneratedImage,
+    GenerationTask,
+    ProductAsset,
+    Project,
+    PromptPack,
+    WorkflowEvent,
+)
 from app.providers import get_text_provider
-from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
+from app.providers.text_provider import ProviderConfigurationError, TextProviderError, TextProviderUnavailable
 from app.schemas import (
     CopywritingRead,
     CopywritingRequest,
+    CopywritingRewriteRequest,
+    CopywritingUpdate,
+    CreativePlanBatchCreate,
+    CreativePlanBatchRead,
+    CreativePlanRevisionRequest,
     CreativePlanRead,
     GenerateImagesRequest,
     GeneratedImageRead,
-    GeneratedImagesResponse,
+    GenerationTaskCenterItem,
+    GenerationTaskDetailRead,
+    GenerationTaskPage,
+    GenerationTaskRead,
     ImageReviewRead,
     ModelConnectionTestRead,
     ModelSettingsRead,
@@ -23,16 +41,18 @@ from app.schemas import (
     ProductAnalysisRead,
     ProductAssetRead,
     ProductVisualAnalysisRead,
+    PromptPackCreate,
+    PromptPackRead,
     ProjectCreate,
     ProjectDetail,
     ProjectRead,
-    RevisionRequest,
-    RevisionResponse,
-    VisualAnalysisReviewRequest,
+    ProjectUpdate,
+    SelectImageRequest,
+    VisualAnalysisCorrectionRequest,
     WorkflowEventRead,
 )
 from app.services import ProductShotWorkflow
-from app.storage import save_upload_file
+from app.storage import remove_upload_file, save_upload_file
 
 router = APIRouter(prefix="/api")
 
@@ -47,7 +67,9 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
             selectinload(Project.assets),
             selectinload(Project.analyses),
             selectinload(Project.creative_plans),
-            selectinload(Project.generation_tasks),
+            selectinload(Project.creative_plan_batches).selectinload(CreativePlanBatch.plans),
+            selectinload(Project.prompt_packs),
+            selectinload(Project.generation_tasks).selectinload(GenerationTask.prompt_pack),
             selectinload(Project.generated_images).selectinload(GeneratedImage.reviews),
             selectinload(Project.generated_images).selectinload(GeneratedImage.task).selectinload(GenerationTask.plan),
             selectinload(Project.copywriting_items),
@@ -59,6 +81,11 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project
+
+
+def require_editable_source(project: Project) -> None:
+    if project.source_confirmed_at is not None:
+        raise HTTPException(status_code=409, detail="商品与原图已经确认，不能再修改。")
 
 
 @router.get("/model-settings", response_model=ModelSettingsRead)
@@ -171,8 +198,21 @@ def _update_provider_settings(provider_name: str, updates: dict[str, str]) -> No
 
 @router.post("/projects", response_model=ProjectRead)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Project:
-    project = Project(**payload.model_dump(), status="draft")
+    project = Project(**payload.model_dump(), target_platform="多平台", status="draft")
     db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+def update_project(project_id: int, payload: ProjectUpdate, db: Session = Depends(get_db)) -> Project:
+    project = get_project_or_404(db, project_id)
+    require_editable_source(project)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "product_name" and value is None:
+            raise HTTPException(status_code=422, detail="商品名称不能为空")
+        setattr(project, field, value)
     db.commit()
     db.refresh(project)
     return project
@@ -183,13 +223,58 @@ def list_projects(db: Session = Depends(get_db)) -> list[Project]:
     return db.query(Project).order_by(Project.updated_at.desc()).all()
 
 
+@router.get("/generation-tasks", response_model=GenerationTaskPage)
+def list_generation_tasks(
+    status: str = Query(default="active", pattern="^(active|queued|running|success|failed|all)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> GenerationTaskPage:
+    query = (
+        db.query(GenerationTask, Project.product_name, CreativePlan.plan_name)
+        .join(Project, Project.id == GenerationTask.project_id)
+        .outerjoin(CreativePlan, CreativePlan.id == GenerationTask.plan_id)
+    )
+    if status == "active":
+        query = query.filter(GenerationTask.status.in_(["queued", "running"]))
+    elif status != "all":
+        query = query.filter(GenerationTask.status == status)
+    total = query.count()
+    rows = (
+        query.order_by(GenerationTask.updated_at.desc(), GenerationTask.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    workflow = ProductShotWorkflow(db)
+    return GenerationTaskPage(
+        items=[
+            GenerationTaskCenterItem(
+                **workflow.task_read(task).model_dump(),
+                project_name=project_name,
+                plan_name=plan_name,
+                parent_image_label=f"图片 #{task.parent_image_id}" if task.parent_image_id else None,
+            )
+            for task, project_name, plan_name in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail:
     project = get_project_or_404(db, project_id)
     workflow = ProductShotWorkflow(db)
     latest_visual = workflow.latest_visual_analysis(project_id)
     latest_analysis = workflow.latest_analysis(project_id)
-    latest_copy = project.copywriting_items[-1] if project.copywriting_items else None
+    copywriting_items = sorted(project.copywriting_items, key=lambda item: (item.created_at, item.id))
+    current_copywriting_by_image: dict[int | None, Copywriting] = {}
+    for item in copywriting_items:
+        current_copywriting_by_image[item.image_id] = item
+    current_copywriting = list(current_copywriting_by_image.values())
+    latest_copy = max(current_copywriting, key=lambda item: (item.created_at, item.id), default=None)
     workflow_events = (
         db.query(WorkflowEvent)
         .filter(WorkflowEvent.project_id == project_id)
@@ -204,8 +289,12 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
         product_strategy=workflow.analysis_read(latest_analysis) if latest_analysis else None,
         latest_analysis=workflow.analysis_read(latest_analysis) if latest_analysis else None,
         creative_plans=[workflow.creative_plan_read(item) for item in project.creative_plans],
-        generated_images=[GeneratedImageRead.model_validate(item) for item in project.generated_images],
+        creative_plan_batches=[workflow.creative_plan_batch_read(item) for item in project.creative_plan_batches],
+        prompt_packs=[workflow.prompt_pack_read(item) for item in project.prompt_packs],
+        generation_tasks=[workflow.task_read(item) for item in project.generation_tasks],
+        generated_images=[workflow.image_read(item) for item in project.generated_images],
         latest_copywriting=workflow.copywriting_read(latest_copy) if latest_copy else None,
+        copywriting=[workflow.copywriting_read(item) for item in current_copywriting],
         workflow_events=[WorkflowEventRead.model_validate(item) for item in workflow_events],
     )
 
@@ -218,26 +307,54 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, 
     return {"message": "项目已删除"}
 
 
-@router.post("/projects/{project_id}/assets", response_model=ProductAssetRead)
-def upload_asset(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> ProductAsset:
-    project = get_project_or_404(db, project_id)
+def replace_primary_asset(project: Project, file: UploadFile, db: Session) -> ProductAsset:
+    require_editable_source(project)
     try:
-        file_path, file_url, file_type = save_upload_file(project_id, file)
+        file_path, file_url, file_type = save_upload_file(project.id, file)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    has_asset = db.query(ProductAsset).filter(ProductAsset.project_id == project_id).first() is not None
+    previous_paths = [
+        row.file_path
+        for row in db.query(ProductAsset).filter(ProductAsset.project_id == project.id).all()
+    ]
+    db.query(ProductAsset).filter(ProductAsset.project_id == project.id).delete(synchronize_session=False)
     asset = ProductAsset(
-        project_id=project_id,
+        project_id=project.id,
         file_url=file_url,
         file_path=file_path,
         file_type=file_type,
-        is_primary=not has_asset,
+        is_primary=True,
     )
     project.status = "draft"
     db.add(asset)
     db.commit()
     db.refresh(asset)
+    for previous_path in previous_paths:
+        remove_upload_file(previous_path)
     return asset
+
+
+@router.post("/projects/{project_id}/assets", response_model=ProductAssetRead)
+def upload_asset(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> ProductAsset:
+    project = get_project_or_404(db, project_id)
+    return replace_primary_asset(project, file, db)
+
+
+@router.put("/projects/{project_id}/primary-asset", response_model=ProductAssetRead)
+def replace_uploaded_asset(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> ProductAsset:
+    project = get_project_or_404(db, project_id)
+    return replace_primary_asset(project, file, db)
+
+
+@router.post("/projects/{project_id}/confirm-source", response_model=ProjectRead)
+def confirm_project_source(project_id: int, db: Session = Depends(get_db)) -> Project:
+    project = get_project_or_404(db, project_id)
+    try:
+        ProductShotWorkflow(db).confirm_source(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(project)
+    return project
 
 
 @router.get("/projects/{project_id}/assets", response_model=list[ProductAssetRead])
@@ -249,38 +366,65 @@ def list_assets(project_id: int, db: Session = Depends(get_db)) -> list[ProductA
 @router.post("/projects/{project_id}/agent/analyze", response_model=ProductAnalysisRead)
 def analyze_project(project_id: int, db: Session = Depends(get_db)) -> ProductAnalysisRead:
     project = get_project_or_404(db, project_id)
-    return ProductShotWorkflow(db).analyze(project)
+    try:
+        return ProductShotWorkflow(db).analyze(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/agent/visual-analysis", response_model=ProductVisualAnalysisRead)
 def ensure_visual_analysis(project_id: int, db: Session = Depends(get_db)) -> ProductVisualAnalysisRead:
     project = get_project_or_404(db, project_id)
-    return ProductShotWorkflow(db).ensure_visual_analysis(project)
+    try:
+        return ProductShotWorkflow(db).ensure_visual_analysis(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.put("/projects/{project_id}/agent/visual-analysis/review", response_model=ProductVisualAnalysisRead)
-def review_visual_analysis(
+@router.post("/projects/{project_id}/agent/visual-analysis/corrections", response_model=ProductVisualAnalysisRead)
+def correct_visual_analysis(
     project_id: int,
-    payload: VisualAnalysisReviewRequest,
+    payload: VisualAnalysisCorrectionRequest,
     db: Session = Depends(get_db),
 ) -> ProductVisualAnalysisRead:
     project = get_project_or_404(db, project_id)
     try:
-        return ProductShotWorkflow(db).review_visual_analysis(project, payload)
+        return ProductShotWorkflow(db).correct_visual_analysis(project, payload.instruction)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/projects/{project_id}/agent/generate-plans", response_model=list[CreativePlanRead])
-def generate_plans(project_id: int, db: Session = Depends(get_db)) -> list[CreativePlanRead]:
+@router.post("/projects/{project_id}/agent/visual-analysis/confirm", response_model=ProductVisualAnalysisRead)
+def confirm_visual_analysis(project_id: int, db: Session = Depends(get_db)) -> ProductVisualAnalysisRead:
     project = get_project_or_404(db, project_id)
-    return ProductShotWorkflow(db).generate_plans(project)
+    try:
+        return ProductShotWorkflow(db).confirm_visual_analysis(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/projects/{project_id}/agent/plan", response_model=list[CreativePlanRead])
-def plan_project(project_id: int, db: Session = Depends(get_db)) -> list[CreativePlanRead]:
+@router.post("/projects/{project_id}/creative-plan-batches", response_model=CreativePlanBatchRead)
+def refresh_creative_plans(
+    project_id: int,
+    payload: CreativePlanBatchCreate,
+    db: Session = Depends(get_db),
+) -> CreativePlanBatchRead:
     project = get_project_or_404(db, project_id)
-    return ProductShotWorkflow(db).plan(project)
+    workflow = ProductShotWorkflow(db)
+    try:
+        workflow.generate_plans(project, payload.feedback, payload.platforms, payload.style_presets)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    batch = (
+        db.query(CreativePlanBatch)
+        .options(selectinload(CreativePlanBatch.plans))
+        .filter(CreativePlanBatch.project_id == project_id)
+        .order_by(CreativePlanBatch.created_at.desc(), CreativePlanBatch.id.desc())
+        .first()
+    )
+    if batch is None:
+        raise HTTPException(status_code=500, detail="创意方向批次创建失败")
+    return workflow.creative_plan_batch_read(batch)
 
 
 @router.get("/projects/{project_id}/creative-plans", response_model=list[CreativePlanRead])
@@ -291,48 +435,149 @@ def list_plans(project_id: int, db: Session = Depends(get_db)) -> list[CreativeP
     return [workflow.creative_plan_read(row) for row in rows]
 
 
-@router.post("/projects/{project_id}/creative-plans/{plan_id}/generate-images", response_model=GeneratedImagesResponse)
-def generate_images(
+@router.get("/projects/{project_id}/creative-plan-batches", response_model=list[CreativePlanBatchRead])
+def list_plan_batches(project_id: int, db: Session = Depends(get_db)) -> list[CreativePlanBatchRead]:
+    get_project_or_404(db, project_id)
+    workflow = ProductShotWorkflow(db)
+    rows = (
+        db.query(CreativePlanBatch)
+        .options(selectinload(CreativePlanBatch.plans))
+        .filter(CreativePlanBatch.project_id == project_id)
+        .order_by(CreativePlanBatch.created_at.desc(), CreativePlanBatch.id.desc())
+        .all()
+    )
+    return [workflow.creative_plan_batch_read(row) for row in rows]
+
+
+@router.post("/projects/{project_id}/creative-plans/{plan_id}/revisions", response_model=CreativePlanRead)
+def revise_creative_plan(
     project_id: int,
     plan_id: int,
-    payload: GenerateImagesRequest,
+    payload: CreativePlanRevisionRequest,
     db: Session = Depends(get_db),
-) -> GeneratedImagesResponse:
+) -> CreativePlanRead:
     project = get_project_or_404(db, project_id)
     plan = db.query(CreativePlan).filter(CreativePlan.id == plan_id, CreativePlan.project_id == project_id).first()
     if plan is None:
         raise HTTPException(status_code=404, detail="创意方案不存在")
     try:
-        return ProductShotWorkflow(db).generate_images(project, plan, payload.count)
-    except (ProviderConfigurationError, ProviderRequestError):
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"图片生成失败：{exc}") from exc
+        return ProductShotWorkflow(db).revise_plan(project, plan, payload.instruction)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/projects/{project_id}/creative-plans/{plan_id}/generate-pack", response_model=GeneratedImagesResponse)
-def generate_pack(
+@router.post("/projects/{project_id}/creative-plans/{plan_id}/prompt-packs", response_model=PromptPackRead)
+def create_plan_prompt_pack(
     project_id: int,
     plan_id: int,
-    payload: GenerateImagesRequest,
+    payload: PromptPackCreate,
     db: Session = Depends(get_db),
-) -> GeneratedImagesResponse:
+) -> PromptPackRead:
     project = get_project_or_404(db, project_id)
     plan = db.query(CreativePlan).filter(CreativePlan.id == plan_id, CreativePlan.project_id == project_id).first()
     if plan is None:
         raise HTTPException(status_code=404, detail="创意方案不存在")
     try:
-        return ProductShotWorkflow(db).generate_pack(project, plan, payload.count)
-    except (ProviderConfigurationError, ProviderRequestError):
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"素材包生成失败：{exc}") from exc
+        return ProductShotWorkflow(db).create_prompt_pack(project, plan, instruction=payload.instruction)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/generated-images/{image_id}/prompt-packs", response_model=PromptPackRead)
+def create_image_iteration_prompt_pack(
+    project_id: int,
+    image_id: int,
+    payload: PromptPackCreate,
+    db: Session = Depends(get_db),
+) -> PromptPackRead:
+    project = get_project_or_404(db, project_id)
+    image = (
+        db.query(GeneratedImage)
+        .options(selectinload(GeneratedImage.task).selectinload(GenerationTask.plan))
+        .filter(GeneratedImage.id == image_id, GeneratedImage.project_id == project_id)
+        .first()
+    )
+    if image is None or image.task.plan is None:
+        raise HTTPException(status_code=404, detail="生成图片或其创意方向不存在")
+    try:
+        return ProductShotWorkflow(db).create_prompt_pack(project, image.task.plan, parent_image=image, instruction=payload.instruction)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/prompt-packs/{prompt_pack_id}", response_model=PromptPackRead)
+def get_prompt_pack(project_id: int, prompt_pack_id: int, db: Session = Depends(get_db)) -> PromptPackRead:
+    get_project_or_404(db, project_id)
+    row = db.query(PromptPack).filter(PromptPack.id == prompt_pack_id, PromptPack.project_id == project_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Prompt Pack 不存在")
+    return ProductShotWorkflow(db).prompt_pack_read(row)
+
+
+@router.post(
+    "/projects/{project_id}/prompt-packs/{prompt_pack_id}/generation-tasks",
+    response_model=GenerationTaskRead,
+    status_code=202,
+)
+def submit_generation_task(
+    project_id: int,
+    prompt_pack_id: int,
+    payload: GenerateImagesRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> GenerationTaskRead:
+    project = get_project_or_404(db, project_id)
+    prompt_pack = db.query(PromptPack).filter(PromptPack.id == prompt_pack_id, PromptPack.project_id == project_id).first()
+    if prompt_pack is None:
+        raise HTTPException(status_code=404, detail="Prompt Pack 不存在")
+    workflow = ProductShotWorkflow(db)
+    try:
+        task = workflow.submit_generation_task(project, prompt_pack, payload.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    background_tasks.add_task(workflow.run_generation_task_in_background, task.id)
+    return task
+
+
+@router.get("/projects/{project_id}/generation-tasks/{task_id}", response_model=GenerationTaskDetailRead)
+def get_generation_task(project_id: int, task_id: int, db: Session = Depends(get_db)) -> GenerationTaskDetailRead:
+    get_project_or_404(db, project_id)
+    task = db.query(GenerationTask).filter(GenerationTask.id == task_id, GenerationTask.project_id == project_id).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="素材任务不存在")
+    return ProductShotWorkflow(db).generation_task_detail(task)
+
+
+@router.post(
+    "/projects/{project_id}/generation-tasks/{task_id}/retry",
+    response_model=GenerationTaskRead,
+    status_code=202,
+)
+def retry_generation_task(
+    project_id: int,
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> GenerationTaskRead:
+    project = get_project_or_404(db, project_id)
+    task = db.query(GenerationTask).filter(GenerationTask.id == task_id, GenerationTask.project_id == project_id).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="素材任务不存在")
+    workflow = ProductShotWorkflow(db)
+    try:
+        retry = workflow.retry_generation_task(project, task)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    background_tasks.add_task(workflow.run_generation_task_in_background, retry.id)
+    return retry
 
 
 @router.get("/projects/{project_id}/generated-images", response_model=list[GeneratedImageRead])
-def list_generated_images(project_id: int, db: Session = Depends(get_db)) -> list[GeneratedImage]:
+def list_generated_images(project_id: int, db: Session = Depends(get_db)) -> list[GeneratedImageRead]:
     get_project_or_404(db, project_id)
-    return db.query(GeneratedImage).filter(GeneratedImage.project_id == project_id).order_by(GeneratedImage.created_at.desc()).all()
+    workflow = ProductShotWorkflow(db)
+    rows = db.query(GeneratedImage).filter(GeneratedImage.project_id == project_id).order_by(GeneratedImage.created_at.desc()).all()
+    return [workflow.image_read(row) for row in rows]
 
 
 @router.post("/projects/{project_id}/generated-images/{image_id}/review", response_model=ImageReviewRead)
@@ -350,6 +595,24 @@ def review_image(project_id: int, image_id: int, db: Session = Depends(get_db)) 
         return ProductShotWorkflow(db).review_image(project, image)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/generated-images/{image_id}/select", response_model=GeneratedImageRead)
+def select_generated_image(
+    project_id: int,
+    image_id: int,
+    payload: SelectImageRequest,
+    db: Session = Depends(get_db),
+) -> GeneratedImageRead:
+    project = get_project_or_404(db, project_id)
+    image = db.query(GeneratedImage).filter(GeneratedImage.id == image_id, GeneratedImage.project_id == project_id).first()
+    if image is None:
+        raise HTTPException(status_code=404, detail="生成图片不存在")
+    if not payload.selected:
+        image.is_selected = False
+        db.commit()
+        return ProductShotWorkflow(db).image_read(image)
+    return ProductShotWorkflow(db).select_image(project, image)
 
 
 @router.post("/projects/{project_id}/copywriting", response_model=CopywritingRead)
@@ -374,71 +637,35 @@ def create_copywriting(project_id: int, payload: CopywritingRequest, db: Session
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/projects/{project_id}/revise", response_model=RevisionResponse)
-def revise_project(project_id: int, payload: RevisionRequest, db: Session = Depends(get_db)) -> RevisionResponse:
+@router.put("/projects/{project_id}/copywriting/{copywriting_id}", response_model=CopywritingRead)
+def update_copywriting(
+    project_id: int,
+    copywriting_id: int,
+    payload: CopywritingUpdate,
+    db: Session = Depends(get_db),
+) -> CopywritingRead:
     project = get_project_or_404(db, project_id)
+    current = db.query(Copywriting).filter(Copywriting.id == copywriting_id, Copywriting.project_id == project_id).first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="文案不存在")
     try:
-        return ProductShotWorkflow(db).revise(project, payload.instruction)
+        return ProductShotWorkflow(db).update_copywriting(project, current, payload.copywriting)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/projects/{project_id}/export/json")
-def export_json(project_id: int, db: Session = Depends(get_db)):
+@router.post("/projects/{project_id}/copywriting/{copywriting_id}/rewrite", response_model=CopywritingRead)
+def rewrite_copywriting(
+    project_id: int,
+    copywriting_id: int,
+    payload: CopywritingRewriteRequest,
+    db: Session = Depends(get_db),
+) -> CopywritingRead:
     project = get_project_or_404(db, project_id)
-    project.status = "exported"
-    db.commit()
-    report = ProductShotWorkflow(db).export_report(project)
-    return report
-
-
-@router.get("/projects/{project_id}/export/markdown")
-def export_markdown(project_id: int, db: Session = Depends(get_db)) -> Response:
-    project = get_project_or_404(db, project_id)
-    project.status = "exported"
-    db.commit()
-    report = ProductShotWorkflow(db).export_report(project)
-    markdown = _report_to_markdown(report)
-    return Response(content=markdown, media_type="text/markdown; charset=utf-8")
-
-
-def _report_to_markdown(report) -> str:
-    lines = [
-        f"# {report.project.product_name} 营销素材报告",
-        "",
-        f"- 目标平台：{report.project.target_platform}",
-        f"- 商品类别：{report.project.product_category or '未填写'}",
-        f"- 目标人群：{report.project.target_audience or '未填写'}",
-        f"- 风格偏好：{report.project.preferred_style or '未填写'}",
-        "",
-        "## 商品分析",
-    ]
-    if report.analysis:
-        lines += [
-            f"- 商品类型：{report.analysis.product_type}",
-            f"- 目标人群分析：{report.analysis.target_audience_analysis}",
-            f"- 推荐卖点：{'、'.join(report.analysis.recommended_selling_points)}",
-            f"- 图片问题：{'、'.join(report.analysis.image_issues)}",
-        ]
-    lines += ["", "## 创意方案"]
-    for plan in report.creative_plans:
-        lines += [
-            f"### {plan.plan_name}",
-            f"- 画面：{plan.plan.visual_description}",
-            f"- 主打卖点：{plan.plan.main_selling_point}",
-            f"- 推荐理由：{plan.plan.recommendation_reason}",
-        ]
-    lines += ["", "## 生成图片与评分"]
-    for image in report.generated_images:
-        lines += [f"- 图片：{image.image_url}，评分：{image.score or '待评分'}"]
-    lines += ["", "## 文案"]
-    for copy in report.copywriting:
-        lines += [
-            f"### {copy.copywriting.title}",
-            f"- 小红书标题：{copy.copywriting.xiaohongshu_title}",
-            f"- 小红书正文：{copy.copywriting.xiaohongshu_text}",
-            f"- 朋友圈文案：{copy.copywriting.moments_text}",
-            f"- 淘宝短文案：{copy.copywriting.taobao_text}",
-            f"- 标签：{'、'.join(copy.copywriting.tags)}",
-        ]
-    return "\n".join(lines) + "\n"
+    current = db.query(Copywriting).filter(Copywriting.id == copywriting_id, Copywriting.project_id == project_id).first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="文案不存在")
+    try:
+        return ProductShotWorkflow(db).rewrite_copywriting(project, current, payload.instruction)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

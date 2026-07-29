@@ -8,12 +8,14 @@ from app.config import settings
 from app.database import Base, engine, ensure_sqlite_compat_schema
 from app import models  # noqa: F401
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
+from app.services import mark_interrupted_generation_tasks
 
 
 def create_app() -> FastAPI:
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
     ensure_sqlite_compat_schema()
+    mark_interrupted_generation_tasks()
     app = FastAPI(title=settings.app_name)
     app.add_middleware(
         CORSMiddleware,

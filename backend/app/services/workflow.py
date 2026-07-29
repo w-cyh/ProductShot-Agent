@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
-
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.agents import (
     CopywritingAgent,
@@ -11,28 +10,31 @@ from app.agents import (
     ImageCriticAgent,
     ProductAnalysisAgent,
     PromptEngineerAgent,
-    RevisionAgent,
     VisualAnalysisAgent,
 )
 from app.models import (
     Copywriting,
     CreativePlan,
+    CreativePlanBatch,
     GeneratedImage,
     GenerationTask,
     ImageReview,
     ProductAnalysis,
     ProductAsset,
     ProductVisualAnalysis,
+    PromptPack,
     Project,
     WorkflowEvent,
 )
+from app.database import SessionLocal
 from app.providers import get_image_provider, get_text_provider
 from app.schemas import (
     CopywritingPayload,
     CopywritingRead,
     CreativePlanPayload,
     CreativePlanRead,
-    ExportReport,
+    CreativePlanBatchRead,
+    GenerationTaskDetailRead,
     GeneratedImageRead,
     GeneratedImagesResponse,
     GenerationTaskRead,
@@ -40,12 +42,10 @@ from app.schemas import (
     ImageReviewRead,
     ProductAnalysisPayload,
     ProductAnalysisRead,
-    ProductAssetRead,
     ProductVisualAnalysisRead,
-    ProjectRead,
-    RevisionResponse,
+    PromptPackPayload,
+    PromptPackRead,
     VisualAnalysisPayload,
-    VisualAnalysisReviewRequest,
     WorkflowEventRead,
 )
 from app.utils.json import dumps, loads
@@ -68,6 +68,21 @@ class LazyTextProvider:
         return get_text_provider().generate_multimodal_json(**kwargs)
 
 
+def mark_interrupted_generation_tasks() -> None:
+    """Tasks run in-process; a previous process cannot resume them after restart."""
+    with SessionLocal() as db:
+        rows = db.query(GenerationTask).filter(GenerationTask.status.in_(["queued", "running"])).all()
+        if not rows:
+            return
+        now = utcnow()
+        for row in rows:
+            row.status = "failed"
+            row.progress_stage = "failed"
+            row.completed_at = now
+            row.error_message = "应用重启导致任务中断，可使用原 Prompt Pack 重试。"
+        db.commit()
+
+
 class ProductShotWorkflow:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -78,14 +93,29 @@ class ProductShotWorkflow:
         self.prompt_agent = PromptEngineerAgent(self.text_provider)
         self.critic_agent = ImageCriticAgent(self.text_provider)
         self.copywriting_agent = CopywritingAgent(self.text_provider)
-        self.revision_agent = RevisionAgent(self.text_provider)
 
-    def plan(self, project: Project) -> list[CreativePlanRead]:
-        self.ensure_visual_analysis(project)
-        self.analyze(project)
-        return self.generate_plans(project)
+    def confirm_source(self, project: Project) -> None:
+        if project.source_confirmed_at is not None:
+            return
+        if self.primary_asset(project.id) is None:
+            raise ValueError("请先上传商品原图后再确认。")
+        project.source_confirmed_at = utcnow()
+        project.status = "source_confirmed"
+        self.db.commit()
+        self.record_event(
+            project.id,
+            step_key="source",
+            agent_name="Human Reviewer",
+            status="success",
+            summary="已确认商品信息与原图，后续内容将以此为准。",
+        )
+
+    def require_confirmed_source(self, project: Project) -> None:
+        if project.source_confirmed_at is None:
+            raise ValueError("请先确认商品与原图，再进入后续流程。")
 
     def ensure_visual_analysis(self, project: Project) -> ProductVisualAnalysisRead:
+        self.require_confirmed_source(project)
         existing = self.latest_visual_analysis(project.id)
         if existing is not None:
             return self.visual_analysis_read(existing)
@@ -122,20 +152,49 @@ class ProductShotWorkflow:
             )
             raise
 
-    def review_visual_analysis(self, project: Project, review: VisualAnalysisReviewRequest) -> ProductVisualAnalysisRead:
+    def correct_visual_analysis(
+        self,
+        project: Project,
+        instruction: str,
+    ) -> ProductVisualAnalysisRead:
+        self.require_confirmed_source(project)
         row = self.latest_visual_analysis(project.id)
         if row is None:
-            self.ensure_visual_analysis(project)
-            row = self.latest_visual_analysis(project.id)
-        if row is None:
-            raise ValueError("原图理解结果不存在")
+            raise ValueError("请先完成原图理解后再提交纠正。")
 
-        payload = review.analysis.model_copy(
-            update={
-                "human_reviewed": True,
-                "human_review_notes": review.review_notes.strip(),
-            }
+        current = VisualAnalysisPayload.model_validate_json(row.analysis_json)
+        primary = self.primary_asset(project.id)
+        payload = self.visual_agent.correct(
+            project,
+            current,
+            instruction,
+            primary.file_path if primary else None,
         )
+        row.analysis_json = payload.model_dump_json()
+        project.status = "visual_review"
+        self.db.commit()
+        self.db.refresh(row)
+        self.record_event(
+            project.id,
+            step_key="visual_review",
+            agent_name="VisualAnalysisAgent",
+            status="success",
+            summary="已根据自然语言意见更新原图理解。",
+            detail={
+                "instruction": instruction.strip(),
+                "product_appearance": payload.product_appearance,
+                "fidelity_constraints": payload.fidelity_constraints,
+            },
+        )
+        return self.visual_analysis_read(row)
+
+    def confirm_visual_analysis(self, project: Project) -> ProductVisualAnalysisRead:
+        self.require_confirmed_source(project)
+        row = self.latest_visual_analysis(project.id)
+        if row is None:
+            raise ValueError("请先完成原图理解后再确认。")
+        current = VisualAnalysisPayload.model_validate_json(row.analysis_json)
+        payload = current.model_copy(update={"human_reviewed": True})
         row.analysis_json = payload.model_dump_json()
         project.status = "visual_reviewed"
         self.db.commit()
@@ -145,19 +204,21 @@ class ProductShotWorkflow:
             step_key="visual_review",
             agent_name="Human Reviewer",
             status="success",
-            summary="人工确认并修正原图理解结果。",
-            detail={
-                "review_notes": payload.human_review_notes,
-                "product_appearance": payload.product_appearance,
-                "fidelity_constraints": payload.fidelity_constraints,
-            },
+            summary="已确认原图理解，可继续生成商品策略。",
+            detail={"fidelity_constraints": payload.fidelity_constraints},
         )
         return self.visual_analysis_read(row)
 
     def analyze(self, project: Project) -> ProductAnalysisRead:
+        self.require_confirmed_source(project)
         started_at = utcnow()
         primary = self.primary_asset(project.id)
-        visual_read = self.ensure_visual_analysis(project)
+        visual_row = self.latest_visual_analysis(project.id)
+        if visual_row is None:
+            raise ValueError("请先完成原图理解并确认。")
+        visual_read = self.visual_analysis_read(visual_row)
+        if not visual_read.analysis.human_reviewed:
+            raise ValueError("请先确认原图理解，再生成商品策略。")
         try:
             payload = self.analysis_agent.run(project, primary.file_path if primary else None, visual_read.analysis)
             row = ProductAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
@@ -192,31 +253,56 @@ class ProductShotWorkflow:
             )
             raise
 
-    def generate_plans(self, project: Project) -> list[CreativePlanRead]:
+    def generate_plans(
+        self,
+        project: Project,
+        feedback: str = "",
+        platforms: list[str] | None = None,
+        style_presets: list[str] | None = None,
+    ) -> list[CreativePlanRead]:
+        self.require_confirmed_source(project)
         started_at = utcnow()
         analysis = self.latest_analysis(project.id)
         if analysis is None:
-            analysis = self.analyze(project)
-            analysis_payload = analysis.analysis
-        else:
-            analysis_payload = ProductAnalysisPayload.model_validate_json(analysis.analysis_json)
+            raise ValueError("请先确认原图理解并生成商品策略。")
+        analysis_payload = ProductAnalysisPayload.model_validate_json(analysis.analysis_json)
+        platforms = platforms or []
+        style_presets = style_presets or []
 
         try:
-            for old in self.db.query(CreativePlan).filter(CreativePlan.project_id == project.id).all():
-                self.db.delete(old)
+            has_existing = self.db.query(CreativePlan.id).filter(CreativePlan.project_id == project.id).first() is not None
+            batch = CreativePlanBatch(
+                project_id=project.id,
+                kind="refresh" if has_existing else "initial",
+                feedback=feedback.strip(),
+                platforms_json=dumps(platforms),
+                style_presets_json=dumps(style_presets),
+            )
+            self.db.add(batch)
             self.db.flush()
 
-            payloads = self.planner_agent.run(project, analysis_payload)
+            self.db.query(CreativePlan).filter(CreativePlan.project_id == project.id, CreativePlan.is_current.is_(True)).update(
+                {CreativePlan.is_current: False}
+            )
+            payloads = self.planner_agent.run(
+                project,
+                analysis_payload,
+                feedback=feedback,
+                platforms=platforms,
+                style_presets=style_presets,
+            )
             rows: list[CreativePlan] = []
             for payload in payloads:
                 row = CreativePlan(
                     project_id=project.id,
+                    plan_batch_id=batch.id,
                     plan_name=payload.plan_name,
                     plan_description=payload.visual_description,
                     target_platform=payload.applicable_platform,
                     visual_style=payload.visual_style,
                     selling_angle=payload.main_selling_point,
                     plan_json=payload.model_dump_json(),
+                    is_current=True,
                 )
                 self.db.add(row)
                 rows.append(row)
@@ -228,7 +314,13 @@ class ProductShotWorkflow:
                 agent_name="CreativePlannerAgent",
                 status="success",
                 summary=f"生成 {len(payloads)} 个创意方向。",
-                detail={"plans": [payload.plan_name for payload in payloads]},
+                detail={
+                    "batch_id": batch.id,
+                    "feedback": feedback.strip(),
+                    "platforms": platforms,
+                    "style_presets": style_presets,
+                    "plans": [payload.plan_name for payload in payloads],
+                },
                 started_at=started_at,
             )
             return [self.creative_plan_read(row) for row in rows]
@@ -245,13 +337,102 @@ class ProductShotWorkflow:
             )
             raise
 
-    def generate_images(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
+    def revise_plan(self, project: Project, plan: CreativePlan, instruction: str) -> CreativePlanRead:
+        self.require_confirmed_source(project)
+        if not plan.is_current:
+            raise ValueError("只能修改当前创意方向。")
+        started_at = utcnow()
+        analysis = self.latest_analysis(project.id)
+        if analysis is None:
+            raise ValueError("请先生成商品策略。")
+        analysis_payload = ProductAnalysisPayload.model_validate_json(analysis.analysis_json)
+        source_payload = CreativePlanPayload.model_validate_json(plan.plan_json)
+        try:
+            payload = self.planner_agent.revise(project, analysis_payload, source_payload, instruction)
+            batch = CreativePlanBatch(
+                project_id=project.id,
+                kind="revision",
+                feedback=instruction.strip(),
+                platforms_json=plan.batch.platforms_json if plan.batch else "[]",
+                style_presets_json=plan.batch.style_presets_json if plan.batch else "[]",
+                source_plan_id=plan.id,
+            )
+            self.db.add(batch)
+            self.db.flush()
+            plan.is_current = False
+            row = self._creative_plan_row(
+                project.id,
+                payload,
+                batch_id=batch.id,
+                parent_plan_id=plan.id,
+                version=plan.version + 1,
+                is_current=True,
+            )
+            self.db.add(row)
+            project.status = "planned"
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="plans",
+                agent_name="CreativePlannerAgent",
+                status="success",
+                summary=f"已基于“{plan.plan_name}”生成方向修改版本。",
+                detail={"source_plan_id": plan.id, "plan_id": row.id, "instruction": instruction.strip()},
+                started_at=started_at,
+            )
+            return self.creative_plan_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="plans",
+                agent_name="CreativePlannerAgent",
+                status="failed",
+                summary="创意方向修改失败。",
+                detail={"source_plan_id": plan.id, "instruction": instruction.strip()},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
+
+    def create_prompt_pack(
+        self,
+        project: Project,
+        plan: CreativePlan,
+        *,
+        parent_image: GeneratedImage | None = None,
+        instruction: str = "",
+    ) -> PromptPackRead:
+        self.require_confirmed_source(project)
+        if parent_image is None and not plan.is_current:
+            raise ValueError("请先选择当前创意方向再生成图片。")
+        started_at = utcnow()
         payload = CreativePlanPayload.model_validate_json(plan.plan_json)
         analysis_row = self.latest_analysis(project.id)
         analysis_payload = ProductAnalysisPayload.model_validate_json(analysis_row.analysis_json) if analysis_row else None
-        prompt_started_at = utcnow()
+        parent_prompt = None
+        if parent_image and parent_image.task and parent_image.task.prompt_pack:
+            parent_prompt = PromptPackPayload.model_validate_json(parent_image.task.prompt_pack.payload_json)
+        elif parent_image and parent_image.prompt_pack_json:
+            parent_prompt = PromptPackPayload.model_validate_json(parent_image.prompt_pack_json)
         try:
-            prompt = self.prompt_agent.run(project, payload, analysis_payload)
+            prompt = self.prompt_agent.run(
+                project,
+                payload,
+                analysis_payload,
+                source_instruction=instruction,
+                parent_prompt=parent_prompt,
+            )
+            row = PromptPack(
+                project_id=project.id,
+                plan_id=plan.id,
+                parent_image_id=parent_image.id if parent_image else None,
+                payload_json=prompt.model_dump_json(),
+                source_instruction=instruction.strip(),
+            )
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
             self.record_event(
                 project.id,
                 step_key="prompt",
@@ -259,7 +440,10 @@ class ProductShotWorkflow:
                 status="success",
                 summary=f"构建 {prompt.size} 的图片生成 Prompt。",
                 detail={
+                    "prompt_pack_id": row.id,
                     "plan_name": payload.plan_name,
+                    "parent_image_id": parent_image.id if parent_image else None,
+                    "instruction": instruction.strip(),
                     "size": prompt.size,
                     "style": prompt.style,
                     "positive_prompt": prompt.positive_prompt,
@@ -267,8 +451,9 @@ class ProductShotWorkflow:
                     "generation_mode": prompt.generation_mode,
                     "reference_strength": prompt.reference_strength,
                 },
-                started_at=prompt_started_at,
+                started_at=started_at,
             )
+            return self.prompt_pack_read(row)
         except Exception as exc:
             self.record_event(
                 project.id,
@@ -276,102 +461,179 @@ class ProductShotWorkflow:
                 agent_name="PromptEngineerAgent",
                 status="failed",
                 summary="Prompt 构建失败。",
-                detail={"plan_name": payload.plan_name},
+                detail={"plan_name": payload.plan_name, "parent_image_id": parent_image.id if parent_image else None},
                 error_message=str(exc),
-                started_at=prompt_started_at,
+                started_at=started_at,
             )
             raise
 
+    def submit_generation_task(self, project: Project, prompt_pack: PromptPack, count: int) -> GenerationTaskRead:
+        self.require_confirmed_source(project)
         provider = get_image_provider()
         provider_model = getattr(provider, "model", provider.name)
-        primary = self.primary_asset(project.id)
-        capabilities = getattr(provider, "capabilities", {"text_to_image"})
-        if prompt.generation_mode in {"image_to_image", "reference_image"} and primary and "image_to_image" not in capabilities:
-            raise RuntimeError(f"{provider.name} ImageProvider does not support source-image generation.")
+        active = (
+            self.db.query(GenerationTask.id)
+            .filter(GenerationTask.project_id == project.id, GenerationTask.status.in_(["queued", "running"]))
+            .first()
+        )
+        if active:
+            raise ValueError("该项目已有正在处理的素材任务，请等待完成或失败后再提交。")
+        prompt = PromptPackPayload.model_validate_json(prompt_pack.payload_json)
+        parent_image = self.db.get(GeneratedImage, prompt_pack.parent_image_id) if prompt_pack.parent_image_id else None
+        iteration = (parent_image.task.iteration + 1) if parent_image and parent_image.task else 1
         task = GenerationTask(
             project_id=project.id,
-            plan_id=plan.id,
+            plan_id=prompt_pack.plan_id,
+            prompt_pack_id=prompt_pack.id,
+            parent_image_id=parent_image.id if parent_image else None,
+            iteration=iteration,
+            requested_count=count,
+            generated_count=0,
+            reviewed_count=0,
+            progress_stage="queued",
             prompt=prompt.positive_prompt,
             negative_prompt=prompt.negative_prompt,
             model_name=provider_model,
-            status="running",
+            status="queued",
         )
         self.db.add(task)
-        self.db.flush()
-        prompt_pack_id = f"prompt_{task.id}_{uuid4().hex[:8]}"
-        image_started_at = utcnow()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ValueError("该项目已有正在处理的素材任务，请等待完成或失败后再提交。") from exc
+        self.db.refresh(task)
         self.record_event(
             project.id,
             step_key="images",
             agent_name=f"{provider.name} ImageProvider",
-            status="running",
-            summary="已开始调用真实图片生成服务，正在等待模型排队和出图。",
+            status="queued",
+            summary="素材任务已提交，等待后台出图。",
             detail={
                 "task_id": task.id,
-                "plan_id": plan.id,
+                "plan_id": prompt_pack.plan_id,
+                "prompt_pack_id": prompt_pack.id,
+                "parent_image_id": task.parent_image_id,
+                "iteration": task.iteration,
                 "model_name": provider_model,
                 "requested_count": count,
                 "generation_mode": prompt.generation_mode,
                 "size": prompt.size,
             },
-            started_at=image_started_at,
+            started_at=utcnow(),
+        )
+        return self.task_read(task)
+
+    def run_generation_task(self, task_id: int) -> None:
+        task = self.db.query(GenerationTask).filter(GenerationTask.id == task_id).first()
+        if task is None or task.status not in {"queued", "running"}:
+            return
+        project = self.db.get(Project, task.project_id)
+        prompt_pack = self.db.get(PromptPack, task.prompt_pack_id) if task.prompt_pack_id else None
+        plan = self.db.get(CreativePlan, task.plan_id) if task.plan_id else None
+        if project is None or prompt_pack is None or plan is None:
+            return
+        prompt = PromptPackPayload.model_validate_json(prompt_pack.payload_json)
+        provider = get_image_provider()
+        started_at = utcnow()
+        task.status = "running"
+        task.progress_stage = "generating"
+        task.started_at = task.started_at or started_at
+        task.error_message = None
+        self.db.commit()
+        self.record_event(
+            project.id,
+            step_key="images",
+            agent_name=f"{provider.name} ImageProvider",
+            status="running",
+            summary="图片服务已接单，正在生成素材。",
+            detail={"task_id": task.id, "requested_count": task.requested_count, "iteration": task.iteration},
+            started_at=started_at,
         )
         try:
-            generated = provider.generate_images(
-                project_id=project.id,
-                source_image_path=primary.file_path if primary else None,
-                positive_prompt=prompt.positive_prompt,
-                negative_prompt=prompt.negative_prompt,
-                size=prompt.size,
-                count=count,
-            )
-            images = [
-                GeneratedImage(
-                    task_id=task.id,
+            source_image = self.db.get(GeneratedImage, task.parent_image_id) if task.parent_image_id else None
+            primary = self.primary_asset(project.id)
+            source_path = source_image.image_path if source_image else (primary.file_path if primary else None)
+            capabilities = getattr(provider, "capabilities", {"text_to_image"})
+            if source_path and "image_to_image" not in capabilities:
+                raise RuntimeError("当前图片模型不支持参考图生成，请在模型设置中更换支持参考图的模型。")
+
+            batch_size = max(1, int(getattr(provider, "max_batch_size", 4)))
+            remaining = task.requested_count
+            created: list[GeneratedImage] = []
+            while remaining > 0:
+                generated = provider.generate_images(
                     project_id=project.id,
-                    plan_id=plan.id,
-                    platform=prompt.platform,
-                    generation_mode=prompt.generation_mode,
-                    prompt_pack_id=prompt_pack_id,
-                    prompt_pack_json=prompt.model_dump_json(),
-                    image_url=item.image_url,
-                    image_path=str(item.image_path),
-                    width=item.width,
-                    height=item.height,
-                    is_selected=index == 0,
+                    source_image_path=source_path,
+                    positive_prompt=prompt.positive_prompt,
+                    negative_prompt=prompt.negative_prompt,
+                    size=prompt.size,
+                    count=min(remaining, batch_size),
                 )
-                for index, item in enumerate(generated)
-            ]
-            self.db.add_all(images)
-            task.status = "success"
+                rows = [
+                    GeneratedImage(
+                        task_id=task.id,
+                        project_id=project.id,
+                        plan_id=plan.id,
+                        platform=prompt.platform,
+                        generation_mode=prompt.generation_mode,
+                        prompt_pack_id=str(prompt_pack.id),
+                        prompt_pack_json=prompt.model_dump_json(),
+                        image_url=item.image_url,
+                        image_path=str(item.image_path),
+                        width=item.width,
+                        height=item.height,
+                    )
+                    for item in generated
+                ]
+                self.db.add_all(rows)
+                self.db.flush()
+                created.extend(rows)
+                task.generated_count += len(rows)
+                remaining -= len(rows)
+                if not rows:
+                    raise RuntimeError("图片服务没有返回素材，请重试或检查图片模型配置。")
+                self.db.commit()
+
+            task.progress_stage = "reviewing"
             project.status = "generated"
+            self.db.commit()
+            for image in created:
+                self.review_image(project, image)
+                task = self.db.get(GenerationTask, task.id)
+                if task is None:
+                    return
+                task.reviewed_count += 1
+                self.db.commit()
+
+            refreshed = (
+                self.db.query(GeneratedImage)
+                .filter(GeneratedImage.task_id == task.id)
+                .order_by(GeneratedImage.score.desc().nullslast(), GeneratedImage.id.asc())
+                .all()
+            )
+            if refreshed:
+                for image in refreshed:
+                    image.is_recommended = image.id == refreshed[0].id
+            task.status = "success"
+            task.progress_stage = "completed"
+            task.completed_at = utcnow()
+            project.status = "reviewed"
             self.db.commit()
             self.record_event(
                 project.id,
                 step_key="images",
                 agent_name=f"{provider.name} ImageProvider",
                 status="success",
-                summary=f"生成 {len(images)} 张营销图片。",
-                detail={
-                    "task_id": task.id,
-                    "plan_id": plan.id,
-                    "model_name": provider_model,
-                    "count": len(images),
-                    "prompt": task.prompt,
-                    "negative_prompt": task.negative_prompt,
-                    "generation_mode": prompt.generation_mode,
-                    "image_ids": [image.id for image in images],
-                },
-                started_at=image_started_at,
-            )
-            return GeneratedImagesResponse(
-                task=GenerationTaskRead.model_validate(task),
-                prompt=prompt,
-                images=[GeneratedImageRead.model_validate(image) for image in images],
+                summary=f"素材任务完成，生成并评分 {task.generated_count} 张图片。",
+                detail={"task_id": task.id, "image_ids": [image.id for image in refreshed], "count": task.generated_count},
+                started_at=started_at,
             )
         except Exception as exc:
             task.status = "failed"
-            task.error_message = str(exc)
+            task.progress_stage = "failed"
+            task.completed_at = utcnow()
+            task.error_message = self.task_error_message(exc)
             self.db.commit()
             self.record_event(
                 project.id,
@@ -379,48 +641,65 @@ class ProductShotWorkflow:
                 agent_name=f"{provider.name} ImageProvider",
                 status="failed",
                 summary="图片生成失败。",
-                detail={"task_id": task.id, "plan_id": plan.id, "model_name": provider_model},
+                detail={"task_id": task.id, "plan_id": plan.id, "model_name": getattr(provider, "model", provider.name)},
                 error_message=str(exc),
-                started_at=image_started_at,
+                started_at=started_at,
             )
-            raise
+            return
+
+    def run_generation_task_in_background(self, task_id: int) -> None:
+        with SessionLocal() as background_db:
+            ProductShotWorkflow(background_db).run_generation_task(task_id)
+
+    def generation_task_detail(self, task: GenerationTask) -> GenerationTaskDetailRead:
+        prompt_pack = self.db.get(PromptPack, task.prompt_pack_id) if task.prompt_pack_id else None
+        images = (
+            self.db.query(GeneratedImage)
+            .filter(GeneratedImage.task_id == task.id)
+            .order_by(GeneratedImage.created_at.asc(), GeneratedImage.id.asc())
+            .all()
+        )
+        return GenerationTaskDetailRead(
+            task=self.task_read(task),
+            prompt_pack=self.prompt_pack_read(prompt_pack) if prompt_pack else None,
+            images=[self.image_read(image) for image in images],
+        )
+
+    def retry_generation_task(self, project: Project, task: GenerationTask) -> GenerationTaskRead:
+        if task.status != "failed" or not task.prompt_pack_id:
+            raise ValueError("只有失败且保留 Prompt Pack 的任务可以重试。")
+        prompt_pack = self.db.get(PromptPack, task.prompt_pack_id)
+        if prompt_pack is None:
+            raise ValueError("原 Prompt Pack 不存在，无法重试。")
+        return self.submit_generation_task(project, prompt_pack, task.requested_count)
+
+    def generate_images(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
+        """Compatibility path for the legacy synchronous API."""
+        prompt_pack = self.create_prompt_pack(project, plan)
+        pack = self.db.get(PromptPack, prompt_pack.id)
+        if pack is None:
+            raise RuntimeError("Prompt Pack 创建失败。")
+        task_read = self.submit_generation_task(project, pack, count)
+        self.run_generation_task(task_read.id)
+        task = self.db.get(GenerationTask, task_read.id)
+        if task is None or task.status == "failed":
+            raise RuntimeError(task.error_message if task else "素材任务不存在")
+        images = self.db.query(GeneratedImage).filter(GeneratedImage.task_id == task.id).all()
+        return GeneratedImagesResponse(
+            task=self.task_read(task),
+            prompt=prompt_pack.prompt,
+            images=[self.image_read(image) for image in images],
+        )
 
     def generate_pack(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
         result = self.generate_images(project, plan, count)
-        images = (
-            self.db.query(GeneratedImage)
-            .filter(GeneratedImage.task_id == result.task.id)
-            .order_by(GeneratedImage.id.asc())
-            .all()
-        )
-        for image in images:
-            self.review_image(project, image)
-
-        refreshed = (
-            self.db.query(GeneratedImage)
-            .filter(GeneratedImage.task_id == result.task.id)
-            .order_by(GeneratedImage.score.desc().nullslast(), GeneratedImage.id.asc())
-            .all()
-        )
-        best = refreshed[0] if refreshed else None
-        if best is not None:
-            for image in refreshed:
-                image.is_recommended = image.id == best.id
-                image.is_selected = image.id == best.id
-            self.db.commit()
-            self.create_copywriting(project, best)
-
-        final_images = (
-            self.db.query(GeneratedImage)
-            .filter(GeneratedImage.task_id == result.task.id)
-            .order_by(GeneratedImage.is_recommended.desc(), GeneratedImage.id.asc())
-            .all()
-        )
-        return GeneratedImagesResponse(
-            task=result.task,
-            prompt=result.prompt,
-            images=[GeneratedImageRead.model_validate(image) for image in final_images],
-        )
+        best = next((image for image in result.images if image.is_recommended), None)
+        if best:
+            image = self.db.get(GeneratedImage, best.id)
+            if image:
+                self.select_image(project, image)
+                self.create_copywriting(project, image)
+        return result
 
     def review_image(self, project: Project, image: GeneratedImage) -> ImageReviewRead:
         started_at = utcnow()
@@ -474,6 +753,7 @@ class ProductShotWorkflow:
             raise
 
     def create_copywriting(self, project: Project, image: GeneratedImage | None) -> CopywritingRead:
+        self.require_confirmed_source(project)
         started_at = utcnow()
         plan = image.task.plan if image and image.task else self.latest_plan(project.id)
         if plan is None:
@@ -483,22 +763,7 @@ class ProductShotWorkflow:
         review_payload = self.review_payload(latest_review) if latest_review else None
         try:
             payload = self.copywriting_agent.run(project, plan_payload, review_payload)
-            row = Copywriting(
-                project_id=project.id,
-                image_id=image.id if image else None,
-                title=payload.title,
-                selling_points_json=dumps(payload.selling_points),
-                xiaohongshu_title=payload.xiaohongshu_title,
-                xiaohongshu_text=payload.xiaohongshu_text,
-                moments_text=payload.moments_text,
-                taobao_text=payload.taobao_text,
-                douyin_script=payload.douyin_script,
-                tags_json=dumps(payload.tags),
-            )
-            project.status = "copywritten"
-            self.db.add(row)
-            self.db.commit()
-            self.db.refresh(row)
+            row = self._save_copywriting(project, image.id if image else None, payload)
             self.record_event(
                 project.id,
                 step_key="copy",
@@ -522,62 +787,73 @@ class ProductShotWorkflow:
             )
             raise
 
-    def revise(self, project: Project, instruction: str) -> RevisionResponse:
+    def update_copywriting(
+        self,
+        project: Project,
+        current: Copywriting,
+        payload: CopywritingPayload,
+    ) -> CopywritingRead:
+        self.require_confirmed_source(project)
+        self._apply_copywriting_payload(current, payload)
+        project.status = "copywritten"
+        self.db.commit()
+        self.db.refresh(current)
+        self.record_event(
+            project.id,
+            step_key="copy",
+            agent_name="Human Copy Editor",
+            status="success",
+            summary="已自动保存当前文案。",
+            detail={"copywriting_id": current.id},
+        )
+        return self.copywriting_read(current)
+
+    def rewrite_copywriting(self, project: Project, current: Copywriting, instruction: str) -> CopywritingRead:
+        self.require_confirmed_source(project)
         started_at = utcnow()
-        plan = self.latest_plan(project.id)
-        if plan is None:
-            raise ValueError("请先生成创意方案")
-        payload = CreativePlanPayload.model_validate_json(plan.plan_json)
         try:
-            response = self.revision_agent.run(project, payload, instruction)
-            project.status = "revised"
+            payload = self.copywriting_agent.rewrite(project, self.copywriting_payload(current), instruction)
+            self._apply_copywriting_payload(current, payload)
+            project.status = "copywritten"
             self.db.commit()
+            self.db.refresh(current)
             self.record_event(
                 project.id,
-                step_key="revision",
-                agent_name="RevisionAgent",
+                step_key="copy",
+                agent_name="CopywritingAgent",
                 status="success",
-                summary=f"识别为 {response.revision_type} 修改，目标：{response.target}。",
-                detail={
-                    "instruction": instruction,
-                    "revision_type": response.revision_type,
-                    "target": response.target,
-                    "should_regenerate": response.should_regenerate,
-                    "modification_plan": response.modification_plan,
-                },
+                summary="已根据修改要求更新当前文案。",
+                detail={"copywriting_id": current.id, "instruction": instruction.strip()},
                 started_at=started_at,
             )
-            return response
+            return self.copywriting_read(current)
         except Exception as exc:
             self.record_event(
                 project.id,
-                step_key="revision",
-                agent_name="RevisionAgent",
+                step_key="copy",
+                agent_name="CopywritingAgent",
                 status="failed",
-                summary="修改意图分析失败。",
-                detail={"instruction": instruction},
+                summary="文案改写失败。",
+                detail={"copywriting_id": current.id, "instruction": instruction.strip()},
                 error_message=str(exc),
                 started_at=started_at,
             )
             raise
 
-    def export_report(self, project: Project, revision: RevisionResponse | None = None) -> ExportReport:
-        return ExportReport(
-            project=ProjectRead.model_validate(project),
-            assets=[ProductAssetRead.model_validate(item) for item in project.assets],
-            analysis=self.analysis_payload(self.latest_analysis(project.id)),
-            creative_plans=[self.creative_plan_read(item) for item in project.creative_plans],
-            generation_tasks=[GenerationTaskRead.model_validate(item) for item in project.generation_tasks],
-            generated_images=[GeneratedImageRead.model_validate(item) for item in project.generated_images],
-            image_reviews=[
-                self.review_read(review)
-                for image in project.generated_images
-                for review in image.reviews
-            ],
-            copywriting=[self.copywriting_read(item) for item in project.copywriting_items],
-            revision=revision,
-            metadata={"provider": get_image_provider().name, "status": project.status},
+    def select_image(self, project: Project, image: GeneratedImage) -> GeneratedImageRead:
+        self.db.query(GeneratedImage).filter(GeneratedImage.project_id == project.id).update({GeneratedImage.is_selected: False})
+        image.is_selected = True
+        self.db.commit()
+        self.db.refresh(image)
+        self.record_event(
+            project.id,
+            step_key="images",
+            agent_name="Human Selector",
+            status="success",
+            summary=f"已将图片 {image.id} 设为交付候选图。",
+            detail={"image_id": image.id},
         )
+        return self.image_read(image)
 
     def workflow_event_read(self, row: WorkflowEvent) -> WorkflowEventRead:
         return WorkflowEventRead.model_validate(row)
@@ -640,7 +916,7 @@ class ProductShotWorkflow:
     def latest_plan(self, project_id: int) -> CreativePlan | None:
         return (
             self.db.query(CreativePlan)
-            .filter(CreativePlan.project_id == project_id)
+            .filter(CreativePlan.project_id == project_id, CreativePlan.is_current.is_(True))
             .order_by(CreativePlan.created_at.desc())
             .first()
         )
@@ -675,12 +951,89 @@ class ProductShotWorkflow:
         return CreativePlanRead(
             id=row.id,
             project_id=row.project_id,
+            plan_batch_id=row.plan_batch_id,
+            parent_plan_id=row.parent_plan_id,
+            version=row.version,
             plan_name=row.plan_name,
             plan_description=row.plan_description,
             target_platform=row.target_platform,
             visual_style=row.visual_style,
             selling_angle=row.selling_angle,
+            is_current=row.is_current,
             plan=CreativePlanPayload.model_validate_json(row.plan_json),
+            created_at=row.created_at,
+        )
+
+    def creative_plan_batch_read(self, row: CreativePlanBatch) -> CreativePlanBatchRead:
+        return CreativePlanBatchRead(
+            id=row.id,
+            project_id=row.project_id,
+            kind=row.kind,
+            feedback=row.feedback,
+            platforms=loads(row.platforms_json, []),
+            style_presets=loads(row.style_presets_json, []),
+            source_plan_id=row.source_plan_id,
+            created_at=row.created_at,
+            plans=[self.creative_plan_read(plan) for plan in sorted(row.plans, key=lambda item: item.id)],
+        )
+
+    def prompt_pack_read(self, row: PromptPack) -> PromptPackRead:
+        return PromptPackRead(
+            id=row.id,
+            project_id=row.project_id,
+            plan_id=row.plan_id,
+            parent_image_id=row.parent_image_id,
+            source_instruction=row.source_instruction,
+            prompt=PromptPackPayload.model_validate_json(row.payload_json),
+            created_at=row.created_at,
+        )
+
+    def task_read(self, row: GenerationTask) -> GenerationTaskRead:
+        return GenerationTaskRead(
+            id=row.id,
+            project_id=row.project_id,
+            plan_id=row.plan_id,
+            prompt_pack_id=row.prompt_pack_id,
+            parent_image_id=row.parent_image_id,
+            iteration=row.iteration,
+            requested_count=row.requested_count,
+            generated_count=row.generated_count,
+            reviewed_count=row.reviewed_count,
+            progress_stage=row.progress_stage,
+            prompt=row.prompt,
+            negative_prompt=row.negative_prompt,
+            model_name=row.model_name,
+            status=row.status,
+            error_message=row.error_message,
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def image_read(self, row: GeneratedImage) -> GeneratedImageRead:
+        latest_review = (
+            self.db.query(ImageReview)
+            .filter(ImageReview.image_id == row.id)
+            .order_by(ImageReview.created_at.desc(), ImageReview.id.desc())
+            .first()
+        )
+        return GeneratedImageRead(
+            id=row.id,
+            task_id=row.task_id,
+            project_id=row.project_id,
+            plan_id=row.plan_id,
+            platform=row.platform,
+            generation_mode=row.generation_mode,
+            prompt_pack_id=row.prompt_pack_id,
+            image_url=row.image_url,
+            image_path=row.image_path,
+            width=row.width,
+            height=row.height,
+            score=row.score,
+            is_selected=row.is_selected,
+            is_recommended=row.is_recommended,
+            review=self.review_read(latest_review) if latest_review else None,
             created_at=row.created_at,
         )
 
@@ -702,17 +1055,20 @@ class ProductShotWorkflow:
     def review_read(self, row: ImageReview) -> ImageReviewRead:
         return ImageReviewRead(id=row.id, image_id=row.image_id, review=self.review_payload(row), created_at=row.created_at)
 
-    def copywriting_read(self, row: Copywriting) -> CopywritingRead:
-        payload = CopywritingPayload(
+    def copywriting_payload(self, row: Copywriting) -> CopywritingPayload:
+        return CopywritingPayload(
             title=row.title,
             selling_points=loads(row.selling_points_json, []),
             xiaohongshu_title=row.xiaohongshu_title,
             xiaohongshu_text=row.xiaohongshu_text,
             moments_text=row.moments_text,
             taobao_text=row.taobao_text,
-            douyin_script=getattr(row, "douyin_script", "") or "",
+            xianyu_text=getattr(row, "xianyu_text", "") or "",
             tags=loads(row.tags_json, []),
         )
+
+    def copywriting_read(self, row: Copywriting) -> CopywritingRead:
+        payload = self.copywriting_payload(row)
         return CopywritingRead(
             id=row.id,
             project_id=row.project_id,
@@ -720,3 +1076,68 @@ class ProductShotWorkflow:
             copywriting=payload,
             created_at=row.created_at,
         )
+
+    def _creative_plan_row(
+        self,
+        project_id: int,
+        payload: CreativePlanPayload,
+        *,
+        batch_id: int,
+        parent_plan_id: int | None = None,
+        version: int = 1,
+        is_current: bool = True,
+    ) -> CreativePlan:
+        return CreativePlan(
+            project_id=project_id,
+            plan_batch_id=batch_id,
+            parent_plan_id=parent_plan_id,
+            version=version,
+            plan_name=payload.plan_name,
+            plan_description=payload.visual_description,
+            target_platform=payload.applicable_platform,
+            visual_style=payload.visual_style,
+            selling_angle=payload.main_selling_point,
+            plan_json=payload.model_dump_json(),
+            is_current=is_current,
+        )
+
+    def _save_copywriting(
+        self,
+        project: Project,
+        image_id: int | None,
+        payload: CopywritingPayload,
+    ) -> Copywriting:
+        row = (
+            self.db.query(Copywriting)
+            .filter(Copywriting.project_id == project.id, Copywriting.image_id == image_id)
+            .order_by(Copywriting.created_at.desc(), Copywriting.id.desc())
+            .first()
+        )
+        if row is None:
+            row = Copywriting(project_id=project.id, image_id=image_id)
+            self.db.add(row)
+        self._apply_copywriting_payload(row, payload)
+        project.status = "copywritten"
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def _apply_copywriting_payload(self, row: Copywriting, payload: CopywritingPayload) -> None:
+        row.title = payload.title
+        row.selling_points_json = dumps(payload.selling_points)
+        row.xiaohongshu_title = payload.xiaohongshu_title
+        row.xiaohongshu_text = payload.xiaohongshu_text
+        row.moments_text = payload.moments_text
+        row.taobao_text = payload.taobao_text
+        row.xianyu_text = payload.xianyu_text
+        row.tags_json = dumps(payload.tags)
+
+    def task_error_message(self, exc: Exception) -> str:
+        message = str(exc)
+        if "does not support asynchronous" in message or "AccessDenied" in message:
+            return "当前图片模型权限或调用方式不匹配，请检查图片模型配置后重试。"
+        if "not configured" in message or "must be configured" in message:
+            return "图片模型尚未配置完成，请在模型设置中检查后重试。"
+        if "reference" in message or "参考图" in message:
+            return "当前图片模型不支持参考图生成，请更换模型或改为从创意方向生成。"
+        return "图片服务未能完成任务，请稍后重试或检查模型设置。"

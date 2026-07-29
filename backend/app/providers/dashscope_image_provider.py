@@ -17,6 +17,7 @@ from app.providers.text_provider import ProviderConfigurationError, ProviderRequ
 class DashscopeImageProvider:
     name = "dashscope"
     capabilities = {"text_to_image", "image_to_image", "reference_image"}
+    max_batch_size = 4
 
     def __init__(self) -> None:
         self.api_key = settings.dashscope_api_key

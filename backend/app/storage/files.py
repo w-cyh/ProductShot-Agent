@@ -23,3 +23,12 @@ def save_upload_file(project_id: int, upload: UploadFile) -> tuple[str, str, str
             file.write(chunk)
     return str(target), f"/uploads/{project_id}/{filename}", upload.content_type or suffix.lstrip(".")
 
+
+def remove_upload_file(file_path: str) -> None:
+    """Remove a superseded pre-confirmation upload without touching other files."""
+    target = Path(file_path).resolve()
+    upload_root = settings.upload_dir.resolve()
+    if upload_root not in target.parents:
+        return
+    if target.is_file():
+        target.unlink()

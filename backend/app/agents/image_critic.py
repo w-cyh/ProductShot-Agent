@@ -33,7 +33,7 @@ class ImageCriticAgent:
                     {
                         "project": {
                             "product_name": project.product_name,
-                            "target_platform": project.target_platform,
+                            "target_platform": plan.applicable_platform,
                             "target_audience": project.target_audience,
                         },
                         "generated_image": {
@@ -68,7 +68,7 @@ class ImageCriticAgent:
                 {
                     "project": {
                         "product_name": project.product_name,
-                        "target_platform": project.target_platform,
+                        "target_platform": plan.applicable_platform,
                         "target_audience": project.target_audience,
                     },
                     "image": {

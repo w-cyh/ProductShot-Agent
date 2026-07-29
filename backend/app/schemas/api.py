@@ -1,18 +1,38 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+
+
+def _utc_iso(value: datetime) -> str:
+    """Return API timestamps as unambiguous UTC ISO 8601 strings.
+
+    SQLite returns naive datetimes even when they originated in UTC. Treat those
+    values as UTC at the response boundary so browsers do not interpret them as
+    local time.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+UtcDateTime = Annotated[datetime, PlainSerializer(_utc_iso, return_type=str, when_used="json")]
 
 
 class ProjectCreate(BaseModel):
     product_name: str = Field(min_length=1, max_length=160)
     product_category: Optional[str] = None
     core_selling_points: Optional[str] = None
-    target_platform: str = Field(min_length=1, max_length=80)
     target_audience: Optional[str] = None
-    preferred_style: Optional[str] = None
+
+
+class ProjectUpdate(BaseModel):
+    product_name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    product_category: Optional[str] = None
+    core_selling_points: Optional[str] = None
+    target_audience: Optional[str] = None
 
 
 class ProjectRead(ProjectCreate):
@@ -20,8 +40,9 @@ class ProjectRead(ProjectCreate):
 
     id: int
     status: str
-    created_at: datetime
-    updated_at: datetime
+    source_confirmed_at: Optional[UtcDateTime] = None
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
 class ProductAssetRead(BaseModel):
@@ -35,7 +56,7 @@ class ProductAssetRead(BaseModel):
     is_primary: bool
     width: Optional[int]
     height: Optional[int]
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class VisualAnalysisPayload(BaseModel):
@@ -51,9 +72,8 @@ class VisualAnalysisPayload(BaseModel):
     human_review_notes: str = ""
 
 
-class VisualAnalysisReviewRequest(BaseModel):
-    analysis: VisualAnalysisPayload
-    review_notes: str = Field(default="", max_length=2000)
+class VisualAnalysisCorrectionRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
 
 
 class ProductStrategyPayload(BaseModel):
@@ -76,14 +96,14 @@ class ProductVisualAnalysisRead(BaseModel):
     id: int
     project_id: int
     analysis: VisualAnalysisPayload
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class ProductAnalysisRead(BaseModel):
     id: int
     project_id: int
     analysis: ProductStrategyPayload
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class CreativePlanPayload(BaseModel):
@@ -103,13 +123,55 @@ class CreativePlanRead(BaseModel):
 
     id: int
     project_id: int
+    plan_batch_id: Optional[int] = None
+    parent_plan_id: Optional[int] = None
+    version: int = 1
     plan_name: str
     plan_description: str
     target_platform: str
     visual_style: str
     selling_angle: str
+    is_current: bool
     plan: CreativePlanPayload
-    created_at: datetime
+    created_at: UtcDateTime
+
+
+class CreativePlanBatchCreate(BaseModel):
+    feedback: str = Field(default="", max_length=2000)
+    platforms: list[str] = Field(default_factory=list, max_length=4)
+    style_presets: list[str] = Field(default_factory=list, max_length=4)
+
+    @field_validator("platforms")
+    @classmethod
+    def validate_platforms(cls, values: list[str]) -> list[str]:
+        supported = {"小红书", "朋友圈", "淘宝", "闲鱼"}
+        if len(values) != len(set(values)) or any(value not in supported for value in values):
+            raise ValueError("平台仅支持小红书、朋友圈、淘宝、闲鱼，且不能重复。")
+        return values
+
+    @field_validator("style_presets")
+    @classmethod
+    def validate_style_presets(cls, values: list[str]) -> list[str]:
+        supported = {"高级极简", "生活方式", "质感特写", "节日促销"}
+        if len(values) != len(set(values)) or any(value not in supported for value in values):
+            raise ValueError("风格仅支持高级极简、生活方式、质感特写、节日促销，且不能重复。")
+        return values
+
+
+class CreativePlanRevisionRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class CreativePlanBatchRead(BaseModel):
+    id: int
+    project_id: int
+    kind: str
+    feedback: str
+    platforms: list[str] = Field(default_factory=list)
+    style_presets: list[str] = Field(default_factory=list)
+    source_plan_id: Optional[int] = None
+    created_at: UtcDateTime
+    plans: list[CreativePlanRead] = Field(default_factory=list)
 
 
 class PromptPayload(BaseModel):
@@ -127,8 +189,22 @@ class PromptPackPayload(PromptPayload):
     consistency_rules: list[str] = Field(default_factory=list)
 
 
+class PromptPackCreate(BaseModel):
+    instruction: str = Field(default="", max_length=2000)
+
+
+class PromptPackRead(BaseModel):
+    id: int
+    project_id: int
+    plan_id: int
+    parent_image_id: Optional[int] = None
+    source_instruction: str
+    prompt: PromptPackPayload
+    created_at: UtcDateTime
+
+
 class GenerateImagesRequest(BaseModel):
-    count: int = Field(default=4, ge=1, le=6)
+    count: int = Field(default=2, ge=1, le=8)
 
 
 class GenerationTaskRead(BaseModel):
@@ -137,39 +213,28 @@ class GenerationTaskRead(BaseModel):
     id: int
     project_id: int
     plan_id: Optional[int]
+    prompt_pack_id: Optional[int] = None
+    parent_image_id: Optional[int] = None
+    iteration: int = 1
+    requested_count: int = 1
+    generated_count: int = 0
+    reviewed_count: int = 0
+    progress_stage: str = "queued"
     prompt: str
     negative_prompt: str
     model_name: str
     status: str
     error_message: Optional[str]
-    created_at: datetime
-    updated_at: datetime
+    started_at: Optional[UtcDateTime] = None
+    completed_at: Optional[UtcDateTime] = None
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
-class GeneratedImageRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    task_id: int
-    project_id: int
-    plan_id: Optional[int] = None
-    platform: Optional[str] = None
-    generation_mode: Optional[str] = None
-    prompt_pack_id: Optional[str] = None
-    image_url: str
-    image_path: str
-    width: Optional[int]
-    height: Optional[int]
-    score: Optional[float]
-    is_selected: bool
-    is_recommended: bool = False
-    created_at: datetime
-
-
-class GeneratedImagesResponse(BaseModel):
+class GenerationTaskDetailRead(BaseModel):
     task: GenerationTaskRead
-    prompt: PromptPackPayload
-    images: list[GeneratedImageRead]
+    prompt_pack: Optional[PromptPackRead] = None
+    images: list["GeneratedImageRead"] = Field(default_factory=list)
 
 
 class ImageReviewPayload(BaseModel):
@@ -190,7 +255,34 @@ class ImageReviewRead(BaseModel):
     id: int
     image_id: int
     review: ImageReviewPayload
-    created_at: datetime
+    created_at: UtcDateTime
+
+
+class GeneratedImageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    project_id: int
+    plan_id: Optional[int] = None
+    platform: Optional[str] = None
+    generation_mode: Optional[str] = None
+    prompt_pack_id: Optional[str] = None
+    image_url: str
+    image_path: str
+    width: Optional[int]
+    height: Optional[int]
+    score: Optional[float]
+    is_selected: bool
+    is_recommended: bool = False
+    review: Optional[ImageReviewRead] = None
+    created_at: UtcDateTime
+
+
+class GeneratedImagesResponse(BaseModel):
+    task: GenerationTaskRead
+    prompt: PromptPackPayload
+    images: list[GeneratedImageRead]
 
 
 class CopywritingRequest(BaseModel):
@@ -204,7 +296,7 @@ class CopywritingPayload(BaseModel):
     xiaohongshu_text: str
     moments_text: str
     taobao_text: str
-    douyin_script: str = ""
+    xianyu_text: str = ""
     tags: list[str]
 
 
@@ -213,12 +305,19 @@ class CopywritingRead(BaseModel):
     project_id: int
     image_id: Optional[int]
     copywriting: CopywritingPayload
-    created_at: datetime
+    created_at: UtcDateTime
 
 
-class RevisionRequest(BaseModel):
-    target_image_id: Optional[int] = None
-    instruction: str = Field(min_length=1)
+class CopywritingUpdate(BaseModel):
+    copywriting: CopywritingPayload
+
+
+class CopywritingRewriteRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class SelectImageRequest(BaseModel):
+    selected: bool = True
 
 
 class ProviderModelSettingsRead(BaseModel):
@@ -257,16 +356,7 @@ class ModelConnectionTestRead(BaseModel):
     status: str
     latency_ms: int
     message: str
-    checked_at: datetime
-
-
-class RevisionResponse(BaseModel):
-    revision_type: str
-    target: str
-    modification_plan: list[str]
-    new_prompt: PromptPackPayload
-    should_regenerate: bool
-    notes: str
+    checked_at: UtcDateTime
 
 
 class WorkflowEventRead(BaseModel):
@@ -280,8 +370,8 @@ class WorkflowEventRead(BaseModel):
     summary: str
     detail_json: str
     error_message: Optional[str]
-    started_at: datetime
-    ended_at: Optional[datetime]
+    started_at: UtcDateTime
+    ended_at: Optional[UtcDateTime]
     latency_ms: Optional[int]
 
 
@@ -291,19 +381,23 @@ class ProjectDetail(ProjectRead):
     product_strategy: Optional[ProductAnalysisRead] = None
     latest_analysis: Optional[ProductAnalysisRead]
     creative_plans: list[CreativePlanRead]
+    creative_plan_batches: list[CreativePlanBatchRead] = Field(default_factory=list)
+    prompt_packs: list[PromptPackRead] = Field(default_factory=list)
+    generation_tasks: list[GenerationTaskRead] = Field(default_factory=list)
     generated_images: list[GeneratedImageRead]
     latest_copywriting: Optional[CopywritingRead]
+    copywriting: list[CopywritingRead] = Field(default_factory=list)
     workflow_events: list[WorkflowEventRead]
 
 
-class ExportReport(BaseModel):
-    project: ProjectRead
-    assets: list[ProductAssetRead]
-    analysis: Optional[ProductAnalysisPayload]
-    creative_plans: list[CreativePlanRead]
-    generation_tasks: list[GenerationTaskRead]
-    generated_images: list[GeneratedImageRead]
-    image_reviews: list[ImageReviewRead]
-    copywriting: list[CopywritingRead]
-    revision: Optional[RevisionResponse] = None
-    metadata: dict[str, Any]
+class GenerationTaskCenterItem(GenerationTaskRead):
+    project_name: str
+    plan_name: Optional[str] = None
+    parent_image_label: Optional[str] = None
+
+
+class GenerationTaskPage(BaseModel):
+    items: list[GenerationTaskCenterItem]
+    total: int
+    page: int
+    page_size: int

@@ -1,6 +1,6 @@
 # ProductShot Agent
 
-面向轻量商家的 AI 商品营销素材生产工作台。它把“普通商品原图”转化为可发布素材：确认商品与原图、原图理解、商品策略、创意方案、图片生成、质量评分，以及多平台文案都在同一个项目上下文中完成。
+面向轻量商家的 AI 商品营销素材生产工作台。它把“普通商品原图”转化为可发布素材：确认商品与原图、原图理解、商品策略、创意方案、图片生成、人工选图，以及多平台文案都在同一个项目上下文中完成。
 
 > 项目定位：不是单点图片生成器，而是围绕“小商家商品内容生产”的多 Agent 工作流系统。
 
@@ -8,11 +8,11 @@
 
 ## 1. 项目简介
 
-ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、图片评价和平台文案生成，收敛成一条可运行的商品素材生产线。
+ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、人工选图和平台文案生成，收敛成一条可运行的商品素材生产线。
 
 - 面向对象：淘宝、朋友圈、小红书、闲鱼等轻量商家和个体卖家。
 - 输入材料：一张商品原图 + 少量商品信息。
-- 输出结果：营销图、评分推荐、各平台当前文案，以及可直接下载/复制的交付内容。
+- 输出结果：营销图、用户选定的交付图、各平台当前文案，以及可直接下载/复制的交付内容。
 - 工程重点：多 Agent 编排、Provider 工具抽象、项目级 Memory、流程可观测性。
 
 ## 2. 项目背景
@@ -24,8 +24,8 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 | 原图背景杂乱、主体不突出 | 先做原图视觉理解，提取商品外观、材质、背景问题和保真约束 |
 | 不会选择视觉方向 | 先生成 3 个创意方向，让用户比较后再生成图片 |
 | 不会写提示词 | Prompt Agent 根据选中方向生成 Prompt Pack 和负向约束 |
-| 不知道生成图能不能发布 | Image Critic 从商品一致性、清晰度、商业价值和平台适配度评分 |
-| 图片和文案割裂 | Copywriting Agent 基于商品策略、创意方向和推荐图生成多平台文案 |
+| 不知道该选哪张生成图 | 在原图对比和交付选择中由用户自主挑选，保留人工判断 |
+| 图片和文案割裂 | Copywriting Agent 基于商品策略、创意方向和选定交付图生成多平台文案 |
 | 模型调用慢、失败难定位 | workflow_events 记录每个 Agent / Provider 的状态、耗时、摘要和详情 |
 
 ## 3. 项目演示
@@ -56,7 +56,7 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 
 **功能**：VisualAnalysisAgent 读取原图，提取外观、材质、背景问题和保真约束；用户通过自然语言纠正并确认后，ProductAnalysisAgent 再生成商品策略。
 
-**效果**：后续 Prompt、生成图评分和文案都能复用同一份商品上下文，避免图片好看但商品主体失真。
+**效果**：后续 Prompt 和文案都能复用同一份商品上下文，避免图片好看但商品主体失真。
 
 ![原图分析与商品策略](docs/assets/studio-analysis.png)
 
@@ -68,19 +68,19 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 
 ![创意方向选择](docs/assets/studio-plans.png)
 
-### 3.6 素材生成与评分
+### 3.6 素材生成与人工选图
 
-**功能**：PromptEngineerAgent 为选中方向构建 Prompt Pack；ImageProvider 生成图片；ImageCriticAgent 完成评分并推荐最佳图。
+**功能**：PromptEngineerAgent 为选中方向构建 Prompt Pack；ImageProvider 生成图片；用户自行比较原图和生成图并选定交付图。
 
-**效果**：生成图以更大的素材卡片展示，用户可以直接选择、重新评分或进入原图对比。
+**效果**：生成图以更大的素材卡片展示，用户可以直接选择、基于此图修改或进入原图对比。
 
-![素材生成与评分](docs/assets/studio-generation.png)
+![素材生成与选图](docs/assets/studio-generation.png)
 
 ### 3.7 文案交付与自然语言修改
 
 **功能**：CopywritingAgent 围绕选中图片生成小红书、朋友圈、淘宝和闲鱼文案；每张交付图只维护一份自动保存的当前稿，交付阶段仅提供图片下载与文案复制。
 
-**效果**：图片、评分、平台文案、标签和后续修改集中在一个交付上下文中，形成可发布素材包。
+**效果**：图片、人工选图、平台文案、标签和后续修改集中在一个交付上下文中，形成可发布素材包。
 
 ![生成素材与文案](docs/assets/studio-output-copy.png)
 
@@ -105,7 +105,7 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 
 **功能**：顶部状态中心始终显示当前节点、等待或失败状态、最新消息和运行时长。每个 Agent / Provider 节点的状态、耗时、摘要和结构化详情集中在“运行记录”抽屉中。
 
-**效果**：模型调用慢、图片生成排队、评分失败、文案异常等问题无需滚到页面底部即可定位；失败记录保留重试入口，历史启动记录不会被误认为仍在运行。
+**效果**：模型调用慢、图片生成排队、文案异常等问题无需滚到页面底部即可定位；失败记录保留重试入口，历史启动记录不会被误认为仍在运行。
 
 ### 3.9 模型管理
 
@@ -122,7 +122,7 @@ ProductShot 的核心价值是把原本分散的 AI 出图、提示词编写、�
 3. 商品策略：仅在用户确认原图理解后提炼人群、卖点和视觉机会。
 4. 创意规划：按可选的小红书、朋友圈、淘宝、闲鱼平台与主流风格生成 3 个方向；不选条件时生成差异化组合。
 5. Prompt Pack：用户选定方向并点击生成图片时才创建正向提示词、负向约束、尺寸和一致性要求。
-6. 图片生成与质量评价：按方向和轮次汇总图片，通过 DashScope / OpenAI Provider 出图并评分。
+6. 图片生成与人工选图：按方向和轮次汇总图片，通过 DashScope / OpenAI Provider 出图并由用户选定交付图。
 7. 文案交付：每张交付图生成小红书、朋友圈、淘宝、闲鱼当前稿，自动保存，可下载图片和复制文案。
 
 ## 5. 技术架构
@@ -141,7 +141,6 @@ flowchart LR
     Agents --> Strategy["ProductAnalysisAgent"]
     Agents --> Planner["CreativePlannerAgent"]
     Agents --> Prompt["PromptEngineerAgent"]
-    Agents --> Critic["ImageCriticAgent"]
     Agents --> Copy["CopywritingAgent"]
     Agents --> Copy["CopywritingAgent"]
 
@@ -154,9 +153,9 @@ flowchart LR
 | 前端 | Vue 3, TypeScript, Vite, Pinia, Vue Router, Element Plus；承载连续式 Studio 工作台 |
 | 后端 | FastAPI, SQLAlchemy, SQLite, Pydantic；负责 API、校验、持久化和任务状态 |
 | Workflow | `ProductShotWorkflow` 编排 Agent、Provider、状态流转和 workflow_events |
-| Agent 层 | 视觉理解、商品策略、创意规划、Prompt、评分、文案和修改意图 |
+| Agent 层 | 视觉理解、商品策略、创意规划、Prompt、文案和修改意图 |
 | Tool / Provider 层 | `TextProvider` 与 `ImageProvider` 抽象，隔离 DashScope 和 OpenAI |
-| Memory | SQLite 保存项目、原图、分析结果、方案、生成图、评分、文案和流程事件 |
+| Memory | SQLite 保存项目、原图、分析结果、方案、生成图、交付选择、文案和流程事件 |
 
 ## 6. Agent 工作流设计
 
@@ -166,11 +165,12 @@ flowchart LR
   -> VisualAnalysisAgent：提取商品外观、背景问题和保真约束
   -> 用户自然语言纠正并确认原图理解
   -> ProductAnalysisAgent：生成商品策略、卖点、人群和视觉机会
+  -> 用户确认策略（确认前支持自然语言纠正）
   -> 用户选择可选平台/风格后，CreativePlannerAgent 生成 3 个创意方向
   -> 用户选择方向
   -> PromptEngineerAgent：构建 Prompt Pack
   -> ImageProvider：生成营销图片
-  -> ImageCriticAgent：评分、排序并推荐最佳图
+  -> 用户在原图对比后选择交付图
   -> CopywritingAgent：生成并更新多平台当前文案
   -> 下载交付图 / 复制文案
 ```
@@ -179,7 +179,7 @@ Agent 设计原则：
 
 1. **职责单一**：每个 Agent 只处理一个明确节点，输出结构化 Pydantic Schema。
 2. **人机协同**：先生成多个方向，关键决策由用户选择，而不是全自动黑盒出图。
-3. **保真优先**：视觉分析阶段提取商品一致性规则，后续 Prompt 和评分都复用这些约束。
+3. **保真优先**：视觉分析阶段提取商品一致性规则，后续 Prompt 和图片修改都复用这些约束。
 4. **真实调用可见**：模型未配置或调用失败时，流程记录错误并停止，不会伪造本地结果。
 
 ## 7. Tool Use 设计
@@ -188,8 +188,8 @@ Agent 设计原则：
 
 | Tool / Provider | 输入 | 输出 | 设计目的 |
 | --- | --- | --- | --- |
-| `TextProvider.generate_json` | system prompt、user prompt、schema name | 结构化 JSON | 统一文字推理、策略、文案和评分输出 |
-| `generate_multimodal_json` | prompt + 图片路径 | 结构化视觉理解 / 评分 | 支持原图理解和生成图质量评价 |
+| `TextProvider.generate_json` | system prompt、user prompt、schema name | 结构化 JSON | 统一文字推理、策略和文案输出 |
+| `generate_multimodal_json` | prompt + 图片路径 | 结构化视觉理解 | 支持原图理解 |
 | `ImageProvider.generate_images` | source image、positive prompt、negative prompt、size、count | 本地图片文件与 URL | 隔离 DashScope、OpenAI 等图片生成实现 |
 | `WorkflowEvent` 记录 | step、agent、status、detail、latency | 可视化流程诊断 | 让工具调用过程可追踪、可排错 |
 
@@ -206,9 +206,9 @@ Agent 设计原则：
 | Memory 类型 | 存储内容 | 作用 |
 | --- | --- | --- |
 | Project Memory | 已确认的商品信息、原图和人群 | 保证后续 Agent 使用同一份锁定上下文 |
-| Visual Memory | 原图理解、材质、背景问题、保真约束、人工审核意见 | 让 Prompt 和评分持续遵守商品一致性 |
-| Creative Memory | 3 个创意方向及用户选中的方向 | 避免生成、评分、文案脱离用户选择 |
-| Asset Memory | 原图、生成图、评分、交付图、当前文案 | 支持回看、下载、复制和继续修改 |
+| Visual Memory | 原图理解、材质、背景问题、保真约束、人工审核意见 | 让 Prompt 和修改持续遵守商品一致性 |
+| Creative Memory | 3 个创意方向及用户选中的方向 | 避免生成和文案脱离用户选择 |
+| Asset Memory | 原图、生成图、交付图、当前文案 | 支持回看、下载、复制和继续修改 |
 | Trace Memory | workflow_events 中的节点状态、耗时、摘要和详情 | 支持问题排查与流程可观测性 |
 
 这种设计的重点是“让多步 Agent 工作流有上下文和可追踪状态”，而不是为了技术展示强行引入 RAG。
@@ -219,23 +219,23 @@ Agent 设计原则：
 
 **方案**：将流程拆成“先分析与规划，再选择方向生成素材包”的两阶段工作流。
 
-**效果**：用户能先比较创意方向，再决定是否生成图片；生成图、评分和当前文案都绑定到同一个项目上下文，形成完整业务闭环。
+**效果**：用户能先比较创意方向，再决定是否生成图片；生成图、交付选择和当前文案都绑定到同一个项目上下文，形成完整业务闭环。
 
 ### 9.2 问题：LLM 输出容易散、难以进入工程流程
 
-**方案**：所有 Agent 输出都落到 Pydantic Schema，例如 `VisualAnalysisPayload`、`ProductAnalysisPayload`、`PromptPackPayload`、`ImageReviewPayload`。
+**方案**：所有运行中的 Agent 输出都落到 Pydantic Schema，例如 `VisualAnalysisPayload`、`ProductAnalysisPayload`、`PromptPackPayload` 和 `CopywritingPayload`。
 
-**效果**：后端可以稳定持久化、复用和展示 Agent 输出，前端也能按固定字段渲染分析、标签、评分和文案。
+**效果**：后端可以稳定持久化、复用和展示 Agent 输出，前端也能按固定字段渲染分析、标签和文案。
 
 ### 9.3 问题：图片生成模型调用慢、失败原因难定位
 
 **方案**：将模型能力封装为 Provider，并持久化记录每个 Agent / Provider 节点的状态、耗时、摘要、错误和结构化详情。
 
-**效果**：用户能在页面看到流程进度和 Agent Trace；开发时也能快速判断问题出在 Prompt、图片生成、评分还是文案节点。
+**效果**：用户能在页面看到流程进度和 Agent Trace；开发时也能快速判断问题出在 Prompt、图片生成还是文案节点。
 
 ### 9.4 问题：AI 生成图可能改变商品主体
 
-**方案**：在原图理解阶段提取商品保真约束，并在 Prompt Pack 和 Image Critic 中持续使用这些约束。
+**方案**：在原图理解阶段提取商品保真约束，并在 Prompt Pack 和图片修改中持续使用这些约束。
 
 **效果**：系统不仅追求“图片好看”，还会关注商品主体是否清晰、是否变形、是否保留关键颜色/标签/材质。
 
@@ -250,7 +250,7 @@ Agent 设计原则：
 | 难点 | 解决方案 | 可面试讲解点 |
 | --- | --- | --- |
 | 多 Agent 输出需要串成稳定业务流 | 服务层统一编排，Agent 输出全部结构化 | 为什么不让 LLM 直接生成整份结果，而是拆节点 |
-| 商品保真比图片美观更重要 | 原图理解提取保真约束，Prompt 和评分复用 | 商品图生成与普通文生图的差异 |
+| 商品保真比图片美观更重要 | 原图理解提取保真约束，Prompt 和修改复用 | 商品图生成与普通文生图的差异 |
 | 真实模型慢且不稳定 | 前端进度、后端 timeout、workflow_events 共同处理 | LLM 应用的可观测性与降级设计 |
 | 前端流程容易割裂 | 统一 `/studio` 工作台，旧路由重定向 | 如何把多步工作流设计成连续体验 |
 | Key 与模型配置安全 | Key 只读后端环境变量，前端只调非敏感配置 | AI 应用中的 secret 边界 |
@@ -335,7 +335,7 @@ npm run build
 .
 ├── backend/
 │   ├── app/
-│   │   ├── agents/        # 商品分析、创意、Prompt、评分、文案、修改 Agent
+│   │   ├── agents/        # 商品分析、创意、Prompt、文案、修改 Agent
 │   │   ├── api/           # FastAPI 路由
 │   │   ├── providers/     # Text / Image Provider 抽象与实现
 │   │   ├── services/      # 工作流编排

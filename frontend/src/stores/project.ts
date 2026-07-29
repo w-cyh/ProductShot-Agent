@@ -3,10 +3,7 @@ import {
   analyzeProject,
   ensureVisualAnalysis,
   getProject,
-  type GeneratedImage,
-  type ImageReviewRead,
-  type ProjectDetail,
-  reviewImage
+  type ProjectDetail
 } from '../api/productshot'
 
 export type StepStatus = 'pending' | 'running' | 'success' | 'failed'
@@ -30,14 +27,23 @@ export interface StudioStage {
   lockedReason?: string
 }
 
+export interface WorkflowOperation {
+  id: number
+  stepKey: string
+  title: string
+  message: string
+  startedAt: string
+}
+
 interface ProjectContext {
   detail: ProjectDetail | null
   loading: boolean
-  lastReview: ImageReviewRead | null
   stage: StudioStageKey
+  operation: WorkflowOperation | null
 }
 
 const pollers = new Map<number, ReturnType<typeof window.setInterval>>()
+let nextOperationId = 0
 
 function initialSteps(): WorkflowStep[] {
   return [
@@ -45,7 +51,6 @@ function initialSteps(): WorkflowStep[] {
     { key: 'visual_analysis', title: '原图理解', status: 'pending', description: '提取商品外观与保真约束' },
     { key: 'analysis', title: '商品策略', status: 'pending', description: '提炼卖点、人群与营销机会' },
     { key: 'plans', title: '创意方向', status: 'pending', description: '生成 3 个可选方向' },
-    { key: 'prompt', title: '提示词', status: 'pending', description: '只在开始生图时构建' },
     { key: 'images', title: '素材生成', status: 'pending', description: '按方向沉淀图片素材' },
     { key: 'copy', title: '发布文案', status: 'pending', description: '为交付图生成当前稿' }
   ]
@@ -76,7 +81,6 @@ function stepsForDetail(detail: ProjectDetail | null | undefined): WorkflowStep[
   if (detail.visual_analysis) set('visual_analysis', detail.visual_analysis.analysis.human_reviewed ? 'success' : 'running')
   if (detail.latest_analysis) set('analysis', 'success')
   if (detail.creative_plans.some((plan) => plan.is_current)) set('plans', 'success')
-  if (detail.prompt_packs.length) set('prompt', 'success')
   if (detail.generation_tasks.some((task) => ['queued', 'running'].includes(task.status))) set('images', 'running')
   else if (detail.generated_images.length) set('images', 'success')
   if (detail.copywriting.length) set('copy', 'success')
@@ -119,7 +123,7 @@ export const useProjectStore = defineStore('project', {
   actions: {
     ensureContext(projectId: number) {
       if (!this.contexts[projectId]) {
-        this.contexts[projectId] = { detail: null, loading: false, lastReview: null, stage: 'brief' }
+        this.contexts[projectId] = { detail: null, loading: false, stage: 'brief', operation: null }
       }
       return this.contexts[projectId]
     },
@@ -156,11 +160,6 @@ export const useProjectStore = defineStore('project', {
       await analyzeProject(projectId)
       await this.load(projectId)
     },
-    async review(projectId: number, image: GeneratedImage) {
-      const context = this.ensureContext(projectId)
-      context.lastReview = await reviewImage(projectId, image.id)
-      await this.load(projectId)
-    },
     stepsFor(projectId: number): WorkflowStep[] {
       return stepsForDetail(this.contexts[projectId]?.detail)
     },
@@ -190,6 +189,19 @@ export const useProjectStore = defineStore('project', {
     },
     stopAllPolling() {
       for (const projectId of pollers.keys()) this.stopPolling(projectId)
+    },
+    beginOperation(projectId: number, input: Omit<WorkflowOperation, 'id' | 'startedAt'>) {
+      const operation: WorkflowOperation = {
+        ...input,
+        id: ++nextOperationId,
+        startedAt: new Date().toISOString()
+      }
+      this.ensureContext(projectId).operation = operation
+      return operation.id
+    },
+    endOperation(projectId: number, operationId: number) {
+      const context = this.ensureContext(projectId)
+      if (context.operation?.id === operationId) context.operation = null
     }
   }
 })

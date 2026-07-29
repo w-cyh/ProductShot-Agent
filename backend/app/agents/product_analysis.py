@@ -37,3 +37,36 @@ class ProductAnalysisAgent:
             schema_name="ProductAnalysisPayload",
         )
         return model_payload
+
+    def correct(
+        self,
+        project: Project,
+        current: ProductAnalysisPayload,
+        instruction: str,
+        visual: VisualAnalysisPayload | None = None,
+    ) -> ProductAnalysisPayload:
+        return generate_payload(
+            provider=self.text_provider,
+            payload_type=ProductAnalysisPayload,
+            system_prompt=(
+                "You are a product marketing strategist for small merchants. Revise the current Chinese product "
+                "strategy according to the user's instruction. Keep unaffected conclusions coherent with the "
+                "confirmed product facts and do not invent unsupported product claims."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "project": {
+                        "product_name": project.product_name,
+                        "product_category": project.product_category,
+                        "core_selling_points": project.core_selling_points,
+                        "target_audience": project.target_audience,
+                    },
+                    "visual_analysis": visual.model_dump() if visual else None,
+                    "current_strategy": current.model_dump(),
+                    "revision_instruction": instruction.strip(),
+                    "required_fields": ProductAnalysisPayload.model_json_schema(),
+                },
+                ensure_ascii=False,
+            ),
+            schema_name="ProductAnalysisPayload",
+        )

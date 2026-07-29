@@ -1,6 +1,6 @@
 # ProductShot Agent Backend
 
-FastAPI 后端，提供商品与原图确认、自然语言原图纠正、创意方向规划、按方向图片生成、评分和当前文案 API。
+FastAPI 后端，提供商品与原图确认、原图与策略的自然语言纠正、创意方向规划、按方向图片生成和当前文案 API。
 
 ## 安装
 
@@ -30,7 +30,7 @@ uvicorn app.main:app --reload
 - `OPENAI_BASE_URL`、`DASHSCOPE_BASE_HTTP_API_URL`：可选 Base URL，默认分别为 OpenAI 与百炼公开地址。
 - `OPENAI_TEXT_MODEL`、`OPENAI_IMAGE_MODEL`：OpenAI 的文字和图片模型 ID。
 - `DASHSCOPE_TEXT_MODEL`：百炼普通文字推理模型 ID；`TEXT_MODEL` 仅作为旧版配置兼容项。
-- `DASHSCOPE_VISION_MODEL`：百炼图片理解与图片评分使用的多模态模型 ID，必须支持 `MultiModalConversation`。
+- `DASHSCOPE_VISION_MODEL`：百炼原图理解使用的多模态模型 ID，必须支持 `MultiModalConversation`。
 - `DASHSCOPE_IMAGE_MODEL`：百炼图片生成模型 ID。
 - `DASHSCOPE_API_KEY`：百炼 API Key，只从系统环境变量读取，不要写入代码或提交到仓库。
 - `DASHSCOPE_BASE_HTTP_API_URL`：百炼 SDK base URL，默认 `https://dashscope.aliyuncs.com/api/v1`。

@@ -29,8 +29,8 @@
             <span>Generated</span>
             <h3>当前生成图</h3>
           </div>
-          <el-tag v-if="selectedImage.is_recommended" type="success">推荐</el-tag>
-          <span v-else class="comparison-score">{{ selectedImage.score ? `${selectedImage.score} 分` : '待评分' }}</span>
+          <el-tag v-if="selectedImage.is_selected" type="success">当前交付图</el-tag>
+          <span v-else class="comparison-score">当前对比图</span>
         </div>
         <div class="comparison-frame">
           <img :src="assetUrl(selectedImage.image_url)" alt="当前选择的生成图" />
@@ -49,7 +49,7 @@
         @click="$emit('select', image.id)"
       >
         <img :src="assetUrl(image.image_url)" alt="" />
-        <span>{{ image.score ? `${image.score} 分` : `图片 ${index + 1}` }}</span>
+        <span>{{ image.is_selected ? '交付图' : `图片 ${index + 1}` }}</span>
       </button>
     </div>
 
@@ -77,7 +77,6 @@ defineEmits<{
 const selectedImage = computed(
   () =>
     props.images.find((image) => image.id === props.selectedImageId) ||
-    props.images.find((image) => image.is_recommended) ||
     props.images[0]
 )
 </script>

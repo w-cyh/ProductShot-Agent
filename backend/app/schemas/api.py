@@ -41,6 +41,7 @@ class ProjectRead(ProjectCreate):
     id: int
     status: str
     source_confirmed_at: Optional[UtcDateTime] = None
+    strategy_confirmed_at: Optional[UtcDateTime] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
@@ -106,6 +107,10 @@ class ProductAnalysisRead(BaseModel):
     created_at: UtcDateTime
 
 
+class StrategyCorrectionRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
 class CreativePlanPayload(BaseModel):
     plan_name: str
     applicable_platform: str
@@ -126,6 +131,7 @@ class CreativePlanRead(BaseModel):
     plan_batch_id: Optional[int] = None
     parent_plan_id: Optional[int] = None
     version: int = 1
+    display_order: int = 0
     plan_name: str
     plan_description: str
     target_platform: str

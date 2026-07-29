@@ -69,7 +69,7 @@ function statusLabel(status: string) {
     analyzed: '已分析',
     planned: '已出方案',
     generated: '已生成',
-    reviewed: '已评分',
+    reviewed: '已生成',
     copywritten: '已出文案',
     revised: '已修改',
     exported: '已导出'

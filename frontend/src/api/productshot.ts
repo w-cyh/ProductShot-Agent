@@ -8,6 +8,7 @@ export interface Project {
   target_audience?: string | null
   status: string
   source_confirmed_at?: string | null
+  strategy_confirmed_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -89,6 +90,7 @@ export interface CreativePlan {
   plan_batch_id?: number | null
   parent_plan_id?: number | null
   version: number
+  display_order: number
   plan_name: string
   plan_description: string
   target_platform: string
@@ -189,10 +191,7 @@ export interface GeneratedImage {
   image_path: string
   width?: number | null
   height?: number | null
-  score?: number | null
   is_selected: boolean
-  is_recommended: boolean
-  review?: ImageReviewRead | null
   created_at: string
 }
 
@@ -200,27 +199,6 @@ export interface GeneratedImagesResponse {
   task: GenerationTask
   prompt: PromptPackPayload
   images: GeneratedImage[]
-}
-
-export interface ImageReviewPayload {
-  overall_score: number
-  product_clarity: number
-  product_consistency: number
-  style_match: number
-  commercial_value: number
-  platform_fit: number
-  text_artifact_risk: string
-  ai_artifact_risk: string
-  recommendation_level: string
-  defects: string[]
-  suggestions: string[]
-}
-
-export interface ImageReviewRead {
-  id: number
-  image_id: number
-  review: ImageReviewPayload
-  created_at: string
 }
 
 export interface CopywritingPayload {
@@ -360,6 +338,16 @@ export async function analyzeProject(projectId: number) {
   return data
 }
 
+export async function correctProductAnalysis(projectId: number, instruction: string) {
+  const { data } = await http.post<ProductAnalysisRead>(`/api/projects/${projectId}/agent/analysis/corrections`, { instruction })
+  return data
+}
+
+export async function confirmProductAnalysis(projectId: number) {
+  const { data } = await http.post<ProductAnalysisRead>(`/api/projects/${projectId}/agent/analysis/confirm`)
+  return data
+}
+
 export async function ensureVisualAnalysis(projectId: number) {
   const { data } = await http.post<ProductVisualAnalysisRead>(`/api/projects/${projectId}/agent/visual-analysis`)
   return data
@@ -418,11 +406,6 @@ export async function getGenerationTask(projectId: number, taskId: number) {
 
 export async function retryGenerationTask(projectId: number, taskId: number) {
   const { data } = await http.post<GenerationTask>(`/api/projects/${projectId}/generation-tasks/${taskId}/retry`)
-  return data
-}
-
-export async function reviewImage(projectId: number, imageId: number) {
-  const { data } = await http.post<ImageReviewRead>(`/api/projects/${projectId}/generated-images/${imageId}/review`)
   return data
 }
 

@@ -5,7 +5,7 @@
         <span class="eyebrow">ProductShot Agent</span>
         <h1 class="page-title">商品素材生产工作台</h1>
         <p class="page-description">
-          从一张商品原图出发，把分析、创意方案、图片生成、评分、文案和导出放在同一个连续工作区里。
+          从一张商品原图出发，把分析、创意方案、图片生成、选图、文案和导出放在同一个连续工作区里。
         </p>
         <div class="home-actions">
           <el-button class="orange-button" type="primary" size="large" @click="$router.push('/studio')">
@@ -71,7 +71,7 @@ const recentProjects = computed(() => projects.value.slice(0, 5))
 const flow = [
   { title: '分析商品', text: '读取商品信息和原图，沉淀人群、卖点、视觉风格和图片问题。', icon: PictureRounded },
   { title: '规划创意', text: '生成多个营销方向，帮助你在生成前先比较场景、卖点和文案路线。', icon: MagicStick },
-  { title: '评价迭代', text: '把生成图、评分、文案和自然语言修改集中在同一个项目上下文。', icon: ChatLineRound }
+  { title: '选图迭代', text: '把生成图、人工选图、文案和自然语言修改集中在同一个项目上下文。', icon: ChatLineRound }
 ]
 
 onMounted(loadRecentProjects)
@@ -101,7 +101,7 @@ function statusLabel(status: string) {
     analyzed: '已分析',
     planned: '已出方案',
     generated: '已生成',
-    reviewed: '已评分',
+    reviewed: '已生成',
     copywritten: '已出文案',
     revised: '已修改',
     exported: '已导出'

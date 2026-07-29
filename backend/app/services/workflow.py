@@ -7,7 +7,6 @@ from sqlalchemy.exc import IntegrityError
 from app.agents import (
     CopywritingAgent,
     CreativePlannerAgent,
-    ImageCriticAgent,
     ProductAnalysisAgent,
     PromptEngineerAgent,
     VisualAnalysisAgent,
@@ -18,7 +17,6 @@ from app.models import (
     CreativePlanBatch,
     GeneratedImage,
     GenerationTask,
-    ImageReview,
     ProductAnalysis,
     ProductAsset,
     ProductVisualAnalysis,
@@ -38,8 +36,6 @@ from app.schemas import (
     GeneratedImageRead,
     GeneratedImagesResponse,
     GenerationTaskRead,
-    ImageReviewPayload,
-    ImageReviewRead,
     ProductAnalysisPayload,
     ProductAnalysisRead,
     ProductVisualAnalysisRead,
@@ -91,7 +87,6 @@ class ProductShotWorkflow:
         self.analysis_agent = ProductAnalysisAgent(self.text_provider)
         self.planner_agent = CreativePlannerAgent(self.text_provider)
         self.prompt_agent = PromptEngineerAgent(self.text_provider)
-        self.critic_agent = ImageCriticAgent(self.text_provider)
         self.copywriting_agent = CopywritingAgent(self.text_provider)
 
     def confirm_source(self, project: Project) -> None:
@@ -211,6 +206,8 @@ class ProductShotWorkflow:
 
     def analyze(self, project: Project) -> ProductAnalysisRead:
         self.require_confirmed_source(project)
+        if project.strategy_confirmed_at is not None:
+            raise ValueError("商品策略已经确认，不能再修改。")
         started_at = utcnow()
         primary = self.primary_asset(project.id)
         visual_row = self.latest_visual_analysis(project.id)
@@ -253,6 +250,66 @@ class ProductShotWorkflow:
             )
             raise
 
+    def correct_analysis(self, project: Project, instruction: str) -> ProductAnalysisRead:
+        self.require_confirmed_source(project)
+        if project.strategy_confirmed_at is not None:
+            raise ValueError("商品策略已经确认，不能再修改。")
+        row = self.latest_analysis(project.id)
+        if row is None:
+            raise ValueError("请先生成商品策略后再提交纠正。")
+        current = ProductAnalysisPayload.model_validate_json(row.analysis_json)
+        visual = self.visual_analysis_payload(self.latest_visual_analysis(project.id))
+        started_at = utcnow()
+        try:
+            payload = self.analysis_agent.correct(project, current, instruction, visual)
+            row.analysis_json = payload.model_dump_json()
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="analysis",
+                agent_name="ProductAnalysisAgent",
+                status="success",
+                summary="已根据自然语言说明更新商品策略。",
+                detail={"instruction": instruction.strip()},
+                started_at=started_at,
+            )
+            return self.analysis_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="analysis",
+                agent_name="ProductAnalysisAgent",
+                status="failed",
+                summary="商品策略纠正失败。",
+                detail={"instruction": instruction.strip()},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
+
+    def confirm_analysis(self, project: Project) -> ProductAnalysisRead:
+        self.require_confirmed_source(project)
+        row = self.latest_analysis(project.id)
+        if row is None:
+            raise ValueError("请先生成商品策略后再确认。")
+        if project.strategy_confirmed_at is None:
+            project.strategy_confirmed_at = utcnow()
+            project.status = "strategy_confirmed"
+            self.db.commit()
+            self.record_event(
+                project.id,
+                step_key="analysis",
+                agent_name="Human Reviewer",
+                status="success",
+                summary="已确认商品策略，可继续生成创意方向。",
+            )
+        return self.analysis_read(row)
+
+    def require_confirmed_strategy(self, project: Project) -> None:
+        if project.strategy_confirmed_at is None:
+            raise ValueError("请先确认商品策略，再生成创意方向。")
+
     def generate_plans(
         self,
         project: Project,
@@ -261,6 +318,7 @@ class ProductShotWorkflow:
         style_presets: list[str] | None = None,
     ) -> list[CreativePlanRead]:
         self.require_confirmed_source(project)
+        self.require_confirmed_strategy(project)
         started_at = utcnow()
         analysis = self.latest_analysis(project.id)
         if analysis is None:
@@ -292,18 +350,8 @@ class ProductShotWorkflow:
                 style_presets=style_presets,
             )
             rows: list[CreativePlan] = []
-            for payload in payloads:
-                row = CreativePlan(
-                    project_id=project.id,
-                    plan_batch_id=batch.id,
-                    plan_name=payload.plan_name,
-                    plan_description=payload.visual_description,
-                    target_platform=payload.applicable_platform,
-                    visual_style=payload.visual_style,
-                    selling_angle=payload.main_selling_point,
-                    plan_json=payload.model_dump_json(),
-                    is_current=True,
-                )
+            for display_order, payload in enumerate(payloads):
+                row = self._creative_plan_row(project.id, payload, batch_id=batch.id, display_order=display_order)
                 self.db.add(row)
                 rows.append(row)
             project.status = "planned"
@@ -366,6 +414,7 @@ class ProductShotWorkflow:
                 batch_id=batch.id,
                 parent_plan_id=plan.id,
                 version=plan.version + 1,
+                display_order=plan.display_order,
                 is_current=True,
             )
             self.db.add(row)
@@ -595,38 +644,18 @@ class ProductShotWorkflow:
                     raise RuntimeError("图片服务没有返回素材，请重试或检查图片模型配置。")
                 self.db.commit()
 
-            task.progress_stage = "reviewing"
-            project.status = "generated"
-            self.db.commit()
-            for image in created:
-                self.review_image(project, image)
-                task = self.db.get(GenerationTask, task.id)
-                if task is None:
-                    return
-                task.reviewed_count += 1
-                self.db.commit()
-
-            refreshed = (
-                self.db.query(GeneratedImage)
-                .filter(GeneratedImage.task_id == task.id)
-                .order_by(GeneratedImage.score.desc().nullslast(), GeneratedImage.id.asc())
-                .all()
-            )
-            if refreshed:
-                for image in refreshed:
-                    image.is_recommended = image.id == refreshed[0].id
             task.status = "success"
             task.progress_stage = "completed"
             task.completed_at = utcnow()
-            project.status = "reviewed"
+            project.status = "generated"
             self.db.commit()
             self.record_event(
                 project.id,
                 step_key="images",
                 agent_name=f"{provider.name} ImageProvider",
                 status="success",
-                summary=f"素材任务完成，生成并评分 {task.generated_count} 张图片。",
-                detail={"task_id": task.id, "image_ids": [image.id for image in refreshed], "count": task.generated_count},
+                summary=f"素材任务完成，生成 {task.generated_count} 张图片。",
+                detail={"task_id": task.id, "image_ids": [image.id for image in created], "count": task.generated_count},
                 started_at=started_at,
             )
         except Exception as exc:
@@ -692,65 +721,7 @@ class ProductShotWorkflow:
         )
 
     def generate_pack(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
-        result = self.generate_images(project, plan, count)
-        best = next((image for image in result.images if image.is_recommended), None)
-        if best:
-            image = self.db.get(GeneratedImage, best.id)
-            if image:
-                self.select_image(project, image)
-                self.create_copywriting(project, image)
-        return result
-
-    def review_image(self, project: Project, image: GeneratedImage) -> ImageReviewRead:
-        started_at = utcnow()
-        if image.task.plan is None:
-            raise ValueError("生成图片缺少创意方案")
-        plan_payload = CreativePlanPayload.model_validate_json(image.task.plan.plan_json)
-        visual = self.visual_analysis_payload(self.latest_visual_analysis(project.id))
-        primary = self.primary_asset(project.id)
-        try:
-            payload = self.critic_agent.run(project, image, plan_payload, visual, primary.file_path if primary else None)
-            row = ImageReview(
-                image_id=image.id,
-                overall_score=payload.overall_score,
-                product_clarity_score=payload.product_clarity,
-                product_consistency_score=payload.product_consistency,
-                style_match_score=payload.style_match,
-                commercial_value_score=payload.commercial_value,
-                platform_fit_score=payload.platform_fit,
-                text_artifact_risk=payload.text_artifact_risk,
-                ai_artifact_risk=payload.ai_artifact_risk,
-                recommendation_level=payload.recommendation_level,
-                defects_json=dumps(payload.defects),
-                suggestions_json=dumps(payload.suggestions),
-            )
-            image.score = payload.overall_score
-            project.status = "reviewed"
-            self.db.add(row)
-            self.db.commit()
-            self.db.refresh(row)
-            self.record_event(
-                project.id,
-                step_key="review",
-                agent_name="ImageCriticAgent",
-                status="success",
-                summary=f"图片 {image.id} 评分 {payload.overall_score}。",
-                detail=payload.model_dump(),
-                started_at=started_at,
-            )
-            return self.review_read(row)
-        except Exception as exc:
-            self.record_event(
-                project.id,
-                step_key="review",
-                agent_name="ImageCriticAgent",
-                status="failed",
-                summary=f"图片 {image.id} 评价失败。",
-                detail={"image_id": image.id},
-                error_message=str(exc),
-                started_at=started_at,
-            )
-            raise
+        return self.generate_images(project, plan, count)
 
     def create_copywriting(self, project: Project, image: GeneratedImage | None) -> CopywritingRead:
         self.require_confirmed_source(project)
@@ -759,10 +730,8 @@ class ProductShotWorkflow:
         if plan is None:
             raise ValueError("请先生成创意方案")
         plan_payload = CreativePlanPayload.model_validate_json(plan.plan_json)
-        latest_review = image.reviews[-1] if image and image.reviews else None
-        review_payload = self.review_payload(latest_review) if latest_review else None
         try:
-            payload = self.copywriting_agent.run(project, plan_payload, review_payload)
+            payload = self.copywriting_agent.run(project, plan_payload)
             row = self._save_copywriting(project, image.id if image else None, payload)
             self.record_event(
                 project.id,
@@ -954,6 +923,7 @@ class ProductShotWorkflow:
             plan_batch_id=row.plan_batch_id,
             parent_plan_id=row.parent_plan_id,
             version=row.version,
+            display_order=row.display_order,
             plan_name=row.plan_name,
             plan_description=row.plan_description,
             target_platform=row.target_platform,
@@ -974,7 +944,7 @@ class ProductShotWorkflow:
             style_presets=loads(row.style_presets_json, []),
             source_plan_id=row.source_plan_id,
             created_at=row.created_at,
-            plans=[self.creative_plan_read(plan) for plan in sorted(row.plans, key=lambda item: item.id)],
+            plans=[self.creative_plan_read(plan) for plan in sorted(row.plans, key=lambda item: (item.display_order, item.id))],
         )
 
     def prompt_pack_read(self, row: PromptPack) -> PromptPackRead:
@@ -1012,12 +982,6 @@ class ProductShotWorkflow:
         )
 
     def image_read(self, row: GeneratedImage) -> GeneratedImageRead:
-        latest_review = (
-            self.db.query(ImageReview)
-            .filter(ImageReview.image_id == row.id)
-            .order_by(ImageReview.created_at.desc(), ImageReview.id.desc())
-            .first()
-        )
         return GeneratedImageRead(
             id=row.id,
             task_id=row.task_id,
@@ -1030,30 +994,12 @@ class ProductShotWorkflow:
             image_path=row.image_path,
             width=row.width,
             height=row.height,
-            score=row.score,
+            score=None,
             is_selected=row.is_selected,
-            is_recommended=row.is_recommended,
-            review=self.review_read(latest_review) if latest_review else None,
+            is_recommended=False,
+            review=None,
             created_at=row.created_at,
         )
-
-    def review_payload(self, row: ImageReview) -> ImageReviewPayload:
-        return ImageReviewPayload(
-            overall_score=row.overall_score,
-            product_clarity=row.product_clarity_score,
-            product_consistency=row.product_consistency_score,
-            style_match=row.style_match_score,
-            commercial_value=row.commercial_value_score,
-            platform_fit=row.platform_fit_score,
-            text_artifact_risk=row.text_artifact_risk,
-            ai_artifact_risk=row.ai_artifact_risk,
-            recommendation_level=row.recommendation_level,
-            defects=loads(row.defects_json, []),
-            suggestions=loads(row.suggestions_json, []),
-        )
-
-    def review_read(self, row: ImageReview) -> ImageReviewRead:
-        return ImageReviewRead(id=row.id, image_id=row.image_id, review=self.review_payload(row), created_at=row.created_at)
 
     def copywriting_payload(self, row: Copywriting) -> CopywritingPayload:
         return CopywritingPayload(
@@ -1085,6 +1031,7 @@ class ProductShotWorkflow:
         batch_id: int,
         parent_plan_id: int | None = None,
         version: int = 1,
+        display_order: int = 0,
         is_current: bool = True,
     ) -> CreativePlan:
         return CreativePlan(
@@ -1092,6 +1039,7 @@ class ProductShotWorkflow:
             plan_batch_id=batch_id,
             parent_plan_id=parent_plan_id,
             version=version,
+            display_order=display_order,
             plan_name=payload.plan_name,
             plan_description=payload.visual_description,
             target_platform=payload.applicable_platform,

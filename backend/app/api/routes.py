@@ -34,7 +34,6 @@ from app.schemas import (
     GenerationTaskDetailRead,
     GenerationTaskPage,
     GenerationTaskRead,
-    ImageReviewRead,
     ModelConnectionTestRead,
     ModelSettingsRead,
     ModelSettingsUpdate,
@@ -48,6 +47,7 @@ from app.schemas import (
     ProjectRead,
     ProjectUpdate,
     SelectImageRequest,
+    StrategyCorrectionRequest,
     VisualAnalysisCorrectionRequest,
     WorkflowEventRead,
 )
@@ -70,7 +70,6 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
             selectinload(Project.creative_plan_batches).selectinload(CreativePlanBatch.plans),
             selectinload(Project.prompt_packs),
             selectinload(Project.generation_tasks).selectinload(GenerationTask.prompt_pack),
-            selectinload(Project.generated_images).selectinload(GeneratedImage.reviews),
             selectinload(Project.generated_images).selectinload(GeneratedImage.task).selectinload(GenerationTask.plan),
             selectinload(Project.copywriting_items),
             selectinload(Project.workflow_events),
@@ -372,6 +371,28 @@ def analyze_project(project_id: int, db: Session = Depends(get_db)) -> ProductAn
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/projects/{project_id}/agent/analysis/corrections", response_model=ProductAnalysisRead)
+def correct_product_analysis(
+    project_id: int,
+    payload: StrategyCorrectionRequest,
+    db: Session = Depends(get_db),
+) -> ProductAnalysisRead:
+    project = get_project_or_404(db, project_id)
+    try:
+        return ProductShotWorkflow(db).correct_analysis(project, payload.instruction)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/agent/analysis/confirm", response_model=ProductAnalysisRead)
+def confirm_product_analysis(project_id: int, db: Session = Depends(get_db)) -> ProductAnalysisRead:
+    project = get_project_or_404(db, project_id)
+    try:
+        return ProductShotWorkflow(db).confirm_analysis(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/projects/{project_id}/agent/visual-analysis", response_model=ProductVisualAnalysisRead)
 def ensure_visual_analysis(project_id: int, db: Session = Depends(get_db)) -> ProductVisualAnalysisRead:
     project = get_project_or_404(db, project_id)
@@ -580,23 +601,6 @@ def list_generated_images(project_id: int, db: Session = Depends(get_db)) -> lis
     return [workflow.image_read(row) for row in rows]
 
 
-@router.post("/projects/{project_id}/generated-images/{image_id}/review", response_model=ImageReviewRead)
-def review_image(project_id: int, image_id: int, db: Session = Depends(get_db)) -> ImageReviewRead:
-    project = get_project_or_404(db, project_id)
-    image = (
-        db.query(GeneratedImage)
-        .options(selectinload(GeneratedImage.task).selectinload(GenerationTask.plan))
-        .filter(GeneratedImage.id == image_id, GeneratedImage.project_id == project_id)
-        .first()
-    )
-    if image is None:
-        raise HTTPException(status_code=404, detail="生成图片不存在")
-    try:
-        return ProductShotWorkflow(db).review_image(project, image)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @router.post("/projects/{project_id}/generated-images/{image_id}/select", response_model=GeneratedImageRead)
 def select_generated_image(
     project_id: int,
@@ -624,7 +628,6 @@ def create_copywriting(project_id: int, payload: CopywritingRequest, db: Session
             db.query(GeneratedImage)
             .options(
                 selectinload(GeneratedImage.task).selectinload(GenerationTask.plan),
-                selectinload(GeneratedImage.reviews),
             )
             .filter(GeneratedImage.id == payload.image_id, GeneratedImage.project_id == project_id)
             .first()

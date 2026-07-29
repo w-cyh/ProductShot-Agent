@@ -31,7 +31,7 @@
       <main class="settings-main">
         <div class="settings-grid">
           <section class="panel panel-pad settings-panel">
-            <div class="panel-heading"><div><p class="section-kicker">Reasoning & vision</p><h2>推理与图片理解</h2><p>文字任务使用文本模型；原图理解和生成图评分必须使用支持图片输入的多模态模型。</p></div></div>
+            <div class="panel-heading"><div><p class="section-kicker">Reasoning & vision</p><h2>推理与图片理解</h2><p>文字任务使用文本模型；原图理解需要使用支持图片输入的多模态模型。</p></div></div>
             <el-skeleton v-if="loading" :rows="5" animated />
             <el-form v-else label-position="top">
               <el-form-item label="Provider"><el-select v-model="form.text_provider"><el-option v-for="provider in providers" :key="provider" :label="providerLabel(provider)" :value="provider" /></el-select></el-form-item>
@@ -43,7 +43,7 @@
                   v-if="form.text_provider === 'dashscope'"
                   class="vision-alert"
                   :type="form.providers.dashscope.vision_model.trim() ? 'info' : 'warning'"
-                  :title="form.providers.dashscope.vision_model.trim() ? '图片理解将使用独立的 DashScope 多模态模型。' : '请配置图片理解模型，否则原图理解和图片评分无法运行。'"
+                  :title="form.providers.dashscope.vision_model.trim() ? '图片理解将使用独立的 DashScope 多模态模型。' : '请配置图片理解模型，否则原图理解无法运行。'"
                   :closable="false"
                   show-icon
                 />
@@ -102,7 +102,7 @@ async function loadSettings() { loading.value = true; error.value = ''; try { sy
 async function saveSettings() {
   saving.value = true; error.value = ''
   if (form.text_provider === 'dashscope' && !form.providers.dashscope.vision_model.trim()) {
-    error.value = '请先填写 DashScope 图片理解模型；原图理解和图片评分需要多模态模型。'
+    error.value = '请先填写 DashScope 图片理解模型；原图理解需要多模态模型。'
     saving.value = false
     return
   }

@@ -4,7 +4,7 @@
       <div>
         <span class="task-kicker">GLOBAL PRODUCTION QUEUE</span>
         <h1>任务中心</h1>
-        <p>集中查看所有商品的长耗时出图与评分任务；每个项目内部串行，不同项目可以并行处理。</p>
+        <p>集中查看所有商品的长耗时出图任务；每个项目内部串行，不同项目可以并行处理。</p>
       </div>
       <div class="task-header-metrics">
         <strong>{{ pageData.total }}</strong>
@@ -38,10 +38,6 @@
               <strong>{{ task.generated_count }}/{{ task.requested_count }}</strong>
             </div>
             <div>
-              <span>质量评分</span>
-              <strong>{{ task.reviewed_count }}/{{ task.generated_count || task.requested_count }}</strong>
-            </div>
-            <div>
               <span>状态</span>
               <strong>{{ stageLabel(task.progress_stage) }}</strong>
             </div>
@@ -55,7 +51,7 @@
         </div>
       </article>
 
-      <el-empty v-if="!loading && !pageData.items.length" description="这里会显示跨项目的出图与评分任务" />
+      <el-empty v-if="!loading && !pageData.items.length" description="这里会显示跨项目的出图任务" />
     </section>
 
     <el-pagination
@@ -138,7 +134,6 @@ function openProject(projectId: number) {
 function taskStatusLabel(task: GenerationTaskCenterItem) {
   if (task.status === 'failed') return '失败，可重试'
   if (task.status === 'success') return '已完成'
-  if (task.progress_stage === 'reviewing') return '评分中'
   if (task.status === 'queued') return '等待处理'
   return '出图中'
 }
@@ -147,7 +142,6 @@ function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     queued: '等待处理',
     generating: '模型出图',
-    reviewing: '质量评分',
     completed: '已完成',
     failed: '失败'
   }

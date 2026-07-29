@@ -5,11 +5,11 @@ import json
 from app.agents.llm import generate_payload
 from app.models import Project
 from app.providers import TextProvider, get_text_provider
-from app.schemas import CopywritingPayload, CreativePlanPayload, ImageReviewPayload
+from app.schemas import CopywritingPayload, CreativePlanPayload
 
 
 class CopywritingAgent:
-    """Generates platform-ready copy that matches the selected concept and review."""
+    """Generates platform-ready copy that matches the selected concept."""
 
     def __init__(self, text_provider: TextProvider | None = None) -> None:
         self.text_provider = text_provider or get_text_provider()
@@ -18,7 +18,6 @@ class CopywritingAgent:
         self,
         project: Project,
         plan: CreativePlanPayload,
-        review: ImageReviewPayload | None = None,
     ) -> CopywritingPayload:
         model_payload = generate_payload(
             provider=self.text_provider,
@@ -36,7 +35,6 @@ class CopywritingAgent:
                     "target_audience": project.target_audience,
                     },
                     "plan": plan.model_dump(),
-                    "review": review.model_dump() if review else None,
                     "required_fields": CopywritingPayload.model_json_schema(),
                 },
                 ensure_ascii=False,

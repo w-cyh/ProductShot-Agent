@@ -39,10 +39,18 @@
       </div>
       <el-progress :percentage="completionPercent" :show-text="false" :status="status === 'failed' ? 'exception' : undefined" />
       <div class="compact-steps">
-        <div v-for="step in steps" :key="step.key" class="compact-step" :class="step.status">
+        <button
+          v-for="step in steps"
+          :key="step.key"
+          class="compact-step"
+          :class="step.status"
+          type="button"
+          :aria-label="`查看${step.title}阶段`"
+          @click="$emit('select-step', step.key)"
+        >
           <span class="compact-dot"></span>
-          <span>{{ step.title }}</span>
-        </div>
+          <span class="compact-step-label">{{ step.title }}</span>
+        </button>
       </div>
     </div>
   </section>
@@ -119,6 +127,7 @@ const props = defineProps<{
 
 defineEmits<{
   primary: []
+  'select-step': [stepKey: string]
 }>()
 
 const eventsOpen = ref(false)
@@ -411,27 +420,75 @@ function eventDetailText(event: WorkflowEvent) {
 
 .compact-steps {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 7px;
+  overflow: visible;
 }
 
 .compact-step {
+  position: relative;
   display: flex;
   min-width: 0;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  padding: 2px 0 0;
+  border: 0;
   color: var(--ps-muted);
+  background: transparent;
+  text-align: center;
   font-size: 10px;
-  white-space: nowrap;
+  cursor: pointer;
 }
 
-.compact-step span:last-child {
+.compact-step::after {
+  position: absolute;
+  top: 5px;
+  left: calc(50% + 4px);
+  width: calc(100% + 3px);
+  height: 2px;
+  content: '';
+  border-radius: 999px;
+}
+
+.compact-step::after {
+  z-index: 0;
+  background: var(--ps-primary);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.compact-step:last-child::after {
+  display: none;
+}
+
+.compact-step.success::after {
+  transform: scaleX(1);
+}
+
+.compact-step.running::after {
+  animation: extend-workflow-connector 2.8s cubic-bezier(.22, 1, .36, 1) forwards;
+}
+
+.compact-step:hover {
+  color: var(--ps-heading);
+}
+
+.compact-step-label {
+  position: relative;
+  z-index: 2;
   overflow: hidden;
+  max-width: 100%;
+  padding: 0 2px;
+  line-height: 1.2;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .compact-dot,
 .event-dot {
+  position: relative;
+  z-index: 2;
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
@@ -453,6 +510,11 @@ function eventDetailText(event: WorkflowEvent) {
 .compact-step.failed .compact-dot,
 .event-dot.failed {
   background: var(--ps-danger);
+}
+
+@keyframes extend-workflow-connector {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }
 
 .drawer-intro {
@@ -577,6 +639,7 @@ function eventDetailText(event: WorkflowEvent) {
   .compact-steps {
     grid-column: 1 / -1;
     overflow-x: auto;
+    padding-bottom: 2px;
   }
 
   .compact-step {

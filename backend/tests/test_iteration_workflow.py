@@ -107,6 +107,7 @@ def create_project(db: Session, tmp_path: Path) -> Project:
         product_name="香薰蜡烛",
         target_platform="多平台",
         source_confirmed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        strategy_confirmed_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(project)
     db.flush()
@@ -168,11 +169,12 @@ def test_plan_revision_replaces_only_that_current_direction_without_prompt(tmp_p
 
         assert db.get(CreativePlan, original.id).is_current is False
         assert db.get(CreativePlan, revised.id).is_current is True
+        assert revised.display_order == original.display_order
         assert db.query(CreativePlan).filter(CreativePlan.project_id == project.id, CreativePlan.is_current.is_(True)).count() == 3
         assert db.query(PromptPack).filter(PromptPack.project_id == project.id).count() == 0
 
 
-def test_background_task_tracks_batches_and_reviews(monkeypatch, tmp_path: Path):
+def test_background_task_tracks_batches_without_scoring(monkeypatch, tmp_path: Path):
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -197,7 +199,6 @@ def test_background_task_tracks_batches_and_reviews(monkeypatch, tmp_path: Path)
         monkeypatch.setattr("app.services.workflow.get_image_provider", lambda: provider)
         workflow = ProductShotWorkflow(db)
         workflow.prompt_agent = FakePromptAgent()
-        workflow.critic_agent = FakeCritic()
 
         prompt_pack = workflow.create_prompt_pack(project, plan)
         persisted_pack = db.get(PromptPack, prompt_pack.id)
@@ -212,16 +213,38 @@ def test_background_task_tracks_batches_and_reviews(monkeypatch, tmp_path: Path)
         assert provider.calls == [2, 1]
         assert stored_task.status == "success"
         assert stored_task.generated_count == 3
-        assert stored_task.reviewed_count == 3
+        assert stored_task.reviewed_count == 0
         assert stored_task.progress_stage == "completed"
-        assert sum(image.is_recommended for image in stored_task.images) == 1
+        assert not any(image.is_recommended for image in stored_task.images)
         assert not any(image.is_selected for image in stored_task.images)
         task_detail = workflow.generation_task_detail(stored_task)
         assert len(task_detail.images) == 3
         detail = get_project(project.id, db)
         assert len(detail.creative_plan_batches) == 1
         assert detail.generation_tasks[0].generated_count == 3
-        assert detail.generated_images[0].review is not None
+        assert detail.generated_images[0].review is None
+
+
+def test_strategy_can_be_corrected_until_confirmation(tmp_path: Path):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        project = create_project(db, tmp_path)
+        project.strategy_confirmed_at = None
+        db.commit()
+        workflow = ProductShotWorkflow(db)
+
+        class CorrectingStrategyAgent:
+            def correct(self, _project, current, instruction, _visual):
+                return current.model_copy(update={"target_audience_analysis": instruction})
+
+        workflow.analysis_agent = CorrectingStrategyAgent()
+        corrected = workflow.correct_analysis(project, "送礼新手")
+        assert corrected.analysis.target_audience_analysis == "送礼新手"
+
+        workflow.confirm_analysis(project)
+        with pytest.raises(ValueError, match="已经确认"):
+            workflow.correct_analysis(project, "不应再修改")
 
 
 def test_manual_copy_updates_the_current_draft(tmp_path: Path):

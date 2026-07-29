@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from typing import Optional
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -27,6 +28,8 @@ def ensure_sqlite_compat_schema() -> None:
         with engine.begin() as connection:
             if "source_confirmed_at" not in project_existing:
                 connection.execute(text("ALTER TABLE projects ADD COLUMN source_confirmed_at DATETIME"))
+            if "strategy_confirmed_at" not in project_existing:
+                connection.execute(text("ALTER TABLE projects ADD COLUMN strategy_confirmed_at DATETIME"))
             connection.execute(
                 text(
                     "UPDATE projects SET source_confirmed_at = COALESCE(source_confirmed_at, updated_at, CURRENT_TIMESTAMP) "
@@ -34,6 +37,14 @@ def ensure_sqlite_compat_schema() -> None:
                     "EXISTS (SELECT 1 FROM product_visual_analyses WHERE product_visual_analyses.project_id = projects.id) "
                     "OR EXISTS (SELECT 1 FROM creative_plans WHERE creative_plans.project_id = projects.id) "
                     "OR EXISTS (SELECT 1 FROM generation_tasks WHERE generation_tasks.project_id = projects.id)"
+                    ")"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE projects SET strategy_confirmed_at = COALESCE(strategy_confirmed_at, updated_at, CURRENT_TIMESTAMP) "
+                    "WHERE strategy_confirmed_at IS NULL AND EXISTS ("
+                    "SELECT 1 FROM creative_plans WHERE creative_plans.project_id = projects.id"
                     ")"
                 )
             )
@@ -72,11 +83,36 @@ def ensure_sqlite_compat_schema() -> None:
             "parent_plan_id": "INTEGER",
             "version": "INTEGER NOT NULL DEFAULT 1",
             "is_current": "BOOLEAN NOT NULL DEFAULT 1",
+            "display_order": "INTEGER NOT NULL DEFAULT 0",
         }
         with engine.begin() as connection:
+            added_display_order = "display_order" not in plan_existing
             for name, ddl in plan_columns.items():
                 if name not in plan_existing:
                     connection.execute(text(f"ALTER TABLE creative_plans ADD COLUMN {name} {ddl}"))
+
+            if added_display_order:
+                rows = connection.execute(
+                    text(
+                        "SELECT id, project_id, plan_batch_id, parent_plan_id FROM creative_plans "
+                        "ORDER BY project_id, plan_batch_id, created_at, id"
+                    )
+                ).mappings().all()
+                next_order: dict[tuple[int, Optional[int]], int] = {}
+                order_by_id: dict[int, int] = {}
+                for row in rows:
+                    parent_id = row["parent_plan_id"]
+                    if parent_id and parent_id in order_by_id:
+                        display_order = order_by_id[parent_id]
+                    else:
+                        key = (row["project_id"], row["plan_batch_id"])
+                        display_order = next_order.get(key, 0)
+                        next_order[key] = display_order + 1
+                    order_by_id[row["id"]] = display_order
+                    connection.execute(
+                        text("UPDATE creative_plans SET display_order = :display_order WHERE id = :id"),
+                        {"display_order": display_order, "id": row["id"]},
+                    )
 
             legacy_projects = connection.execute(
                 text("SELECT DISTINCT project_id FROM creative_plans WHERE plan_batch_id IS NULL")

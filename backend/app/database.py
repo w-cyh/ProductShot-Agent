@@ -12,7 +12,8 @@ class Base(DeclarativeBase):
 
 
 settings.ensure_dirs()
-engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
+engine_options = {"connect_args": {"check_same_thread": False}} if settings.database_url.startswith("sqlite") else {}
+engine = create_engine(settings.database_url, **engine_options)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -67,14 +68,34 @@ def ensure_sqlite_compat_schema() -> None:
         review_existing = {column["name"] for column in inspector.get_columns("image_reviews")}
         review_columns = {
             "product_consistency_score": "INTEGER NOT NULL DEFAULT 80",
+            "text_accuracy_score": "INTEGER NOT NULL DEFAULT 80",
             "text_artifact_risk": "VARCHAR(40) NOT NULL DEFAULT 'low'",
             "ai_artifact_risk": "VARCHAR(40) NOT NULL DEFAULT 'low'",
             "recommendation_level": "VARCHAR(40) NOT NULL DEFAULT 'usable'",
+            "evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+            "hard_defects_json": "TEXT NOT NULL DEFAULT '[]'",
+            "prompt_revision": "TEXT NOT NULL DEFAULT ''",
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "quality_run_id": "INTEGER",
         }
         with engine.begin() as connection:
             for name, ddl in review_columns.items():
                 if name not in review_existing:
                     connection.execute(text(f"ALTER TABLE image_reviews ADD COLUMN {name} {ddl}"))
+
+    if "quality_runs" in inspector.get_table_names():
+        quality_run_existing = {column["name"] for column in inspector.get_columns("quality_runs")}
+        if "acceptance_tier" not in quality_run_existing:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE quality_runs ADD COLUMN acceptance_tier VARCHAR(40) NOT NULL DEFAULT 'standard'"))
+                connection.execute(
+                    text(
+                        "UPDATE quality_runs SET acceptance_tier = CASE "
+                        "WHEN target_score >= 90 THEN 'strict' "
+                        "WHEN target_score < 80 THEN 'loose' "
+                        "ELSE 'standard' END"
+                    )
+                )
 
     if "creative_plans" in inspector.get_table_names():
         plan_existing = {column["name"] for column in inspector.get_columns("creative_plans")}
@@ -194,6 +215,7 @@ def ensure_sqlite_compat_schema() -> None:
             "progress_stage": "VARCHAR(40) NOT NULL DEFAULT 'queued'",
             "started_at": "DATETIME",
             "completed_at": "DATETIME",
+            "quality_run_id": "INTEGER",
         }
         with engine.begin() as connection:
             for name, ddl in task_columns.items():

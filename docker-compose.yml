@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: productshot
+      POSTGRES_USER: productshot
+      POSTGRES_PASSWORD: productshot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U productshot -d productshot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - productshot-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment: &backend_environment
+      DATABASE_URL: postgresql+psycopg://productshot:productshot@postgres:5432/productshot
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - productshot-uploads:/app/uploads
+
+  worker:
+    build: ./backend
+    command: celery -A app.celery_app.celery_app worker --loglevel=INFO
+    environment: *backend_environment
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - productshot-uploads:/app/uploads
+
+volumes:
+  productshot-postgres:
+  productshot-uploads:

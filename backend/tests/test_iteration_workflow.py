@@ -92,11 +92,10 @@ class FakeCritic:
     def run(self, *_args, **_kwargs):
         return ImageReviewPayload(
             overall_score=86,
-            product_clarity=88,
-            product_consistency=91,
-            style_match=84,
-            commercial_value=87,
-            platform_fit=85,
+            product_clarity=9,
+            product_consistency=9,
+            commercial_value=9,
+            text_accuracy=9,
             defects=[],
             suggestions=[],
         )

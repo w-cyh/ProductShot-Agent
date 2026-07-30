@@ -10,15 +10,16 @@ import httpx
 
 from app.config import settings
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
+from app.model_settings import ProviderRuntimeConfig
 
 
 class OpenAITextProvider:
     name = "openai"
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_config: ProviderRuntimeConfig | None = None) -> None:
         self.api_key = settings.openai_api_key
-        self.model = settings.openai_text_model
-        self.base_url = settings.openai_base_url.rstrip("/")
+        self.model = runtime_config.text_model if runtime_config else settings.openai_text_model
+        self.base_url = (runtime_config.base_url if runtime_config else settings.openai_base_url).rstrip("/")
 
     def generate_json(
         self,
@@ -41,20 +42,24 @@ class OpenAITextProvider:
         *,
         system_prompt: str,
         user_prompt: str,
-        image_path: str,
         schema_name: str,
         schema: dict[str, Any],
         temperature: float = 0.2,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
-        image_url = self._image_data_url(image_path)
+        resolved_paths = image_paths or ([image_path] if image_path else [])
+        if not resolved_paths:
+            raise ProviderRequestError("OpenAI multimodal requests require at least one image path.")
         return self._request_json(
             input_items=[
                 {"role": "developer", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": user_prompt},
-                        {"type": "input_image", "image_url": image_url, "detail": "high"},
+                    "content": [{"type": "input_text", "text": user_prompt}]
+                    + [
+                        {"type": "input_image", "image_url": self._image_data_url(path), "detail": "high"}
+                        for path in resolved_paths
                     ],
                 },
             ],

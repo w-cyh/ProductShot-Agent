@@ -12,6 +12,7 @@ import httpx
 from app.config import settings
 from app.providers.image_provider import GeneratedImageFile
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
+from app.model_settings import ProviderRuntimeConfig
 
 
 class DashscopeImageProvider:
@@ -19,10 +20,11 @@ class DashscopeImageProvider:
     capabilities = {"text_to_image", "image_to_image", "reference_image"}
     max_batch_size = 4
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_config: ProviderRuntimeConfig | None = None) -> None:
         self.api_key = settings.dashscope_api_key
-        self.model = settings.dashscope_image_model
-        self.base_url = self._base_api_url(settings.dashscope_image_generation_url)
+        self.model = runtime_config.image_model if runtime_config else settings.dashscope_image_model
+        configured_base_url = runtime_config.base_url if runtime_config else settings.dashscope_image_generation_url
+        self.base_url = self._base_api_url(configured_base_url)
         self.generation_url = f"{self.base_url}/services/aigc/image-generation/generation"
         self.synchronous_generation_url = f"{self.base_url}/services/aigc/multimodal-generation/generation"
         self.poll_interval_seconds = 2

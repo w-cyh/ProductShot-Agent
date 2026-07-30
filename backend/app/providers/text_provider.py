@@ -39,9 +39,10 @@ class TextProvider(Protocol):
         *,
         system_prompt: str,
         user_prompt: str,
-        image_path: str,
         schema_name: str,
         schema: dict[str, Any],
         temperature: float = 0.2,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         ...

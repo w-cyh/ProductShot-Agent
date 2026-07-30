@@ -11,6 +11,7 @@ import httpx
 from app.config import settings
 from app.providers.image_provider import GeneratedImageFile
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
+from app.model_settings import ProviderRuntimeConfig
 
 
 class OpenAIImageProvider:
@@ -18,10 +19,10 @@ class OpenAIImageProvider:
     capabilities = {"text_to_image", "image_to_image", "reference_image"}
     max_batch_size = 4
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_config: ProviderRuntimeConfig | None = None) -> None:
         self.api_key = settings.openai_api_key
-        self.model = settings.openai_image_model
-        self.base_url = settings.openai_base_url.rstrip("/")
+        self.model = runtime_config.image_model if runtime_config else settings.openai_image_model
+        self.base_url = (runtime_config.base_url if runtime_config else settings.openai_base_url).rstrip("/")
 
     def generate_images(
         self,

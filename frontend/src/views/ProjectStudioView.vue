@@ -207,18 +207,18 @@
               </div>
             </div>
 
-            <div v-if="currentPlans.length" class="plan-grid">
-              <article v-for="plan in currentPlans" :key="plan.id" class="plan-card" :class="{ selected: plan.id === selectedPlanId }">
+            <div v-if="currentPlans.length" class="plan-grid" role="radiogroup" aria-label="创意方向选择">
+              <article v-for="plan in currentPlans" :key="plan.id" class="plan-card" :class="{ selected: plan.id === selectedPlanId }" role="radio" :aria-checked="plan.id === selectedPlanId" :tabindex="0" @click="selectPlan(plan.id)" @keydown.enter.prevent="selectPlan(plan.id)" @keydown.space.prevent="selectPlan(plan.id)">
                 <div class="plan-card-head">
                   <div>
                     <span class="plan-index">方向 {{ currentPlans.indexOf(plan) + 1 }}</span>
                     <h3>{{ plan.plan_name }}</h3>
                   </div>
-                  <el-tag effect="plain">{{ plan.target_platform }}</el-tag>
+                  <div class="plan-card-status"><el-tag effect="plain">{{ plan.target_platform }}</el-tag><el-tag v-if="plan.id === selectedPlanId" type="success" effect="plain">已选择</el-tag></div>
                 </div>
                 <div class="plan-tags"><span>{{ plan.visual_style }}</span><span>{{ plan.selling_angle }}</span></div>
                 <p class="plan-description">{{ plan.plan_description }}</p>
-                <el-collapse class="plan-details">
+                <el-collapse class="plan-details" @click.stop @keydown.stop>
                   <el-collapse-item title="展开详细设计" name="details">
                     <dl class="plan-facts">
                       <div><dt>画面描述</dt><dd>{{ plan.plan.visual_description }}</dd></div>
@@ -229,12 +229,7 @@
                     </dl>
                   </el-collapse-item>
                 </el-collapse>
-                <div class="plan-actions">
-                  <el-button :type="plan.id === selectedPlanId ? 'primary' : 'default'" @click="selectedPlanId = plan.id">
-                    {{ plan.id === selectedPlanId ? '已选择' : '选择此方向' }}
-                  </el-button>
-                </div>
-                <div class="plan-revision">
+                <div class="plan-revision" @click.stop @keydown.stop>
                   <el-input v-model="planFeedback[plan.id]" placeholder="想修改这个方向？用一句话说明" />
                   <el-button :loading="revisingPlanId === plan.id" :disabled="!planFeedback[plan.id]?.trim()" @click="revisePlan(plan)">修改方向</el-button>
                 </div>
@@ -244,10 +239,48 @@
             <footer v-if="selectedPlan" class="stage-action-bar selection-bar">
               <p><strong>已选择：{{ selectedPlan.plan_name }}</strong><br />确认方案后才会为本轮生成 Prompt Pack 并开始出图。</p>
               <div class="generation-start-actions">
-                <el-select v-model="generationCount" aria-label="生成图片数量"><el-option v-for="count in generationCounts" :key="count" :label="`${count} 张`" :value="count" /></el-select>
-                <el-button class="orange-button" type="primary" size="large" :loading="submittingTask" :disabled="Boolean(activeTask)" @click="startGeneration">生成图片</el-button>
+                <el-select v-if="!qualityModeEnabled" v-model="generationCount" aria-label="生成图片数量"><el-option v-for="count in generationCounts" :key="count" :label="`${count} 张`" :value="count" /></el-select>
+                <el-button class="orange-button" type="primary" size="large" :loading="submittingTask" :disabled="Boolean(activeTask) || Boolean(activeQualityRun)" @click="startGeneration">
+                  {{ qualityModeEnabled ? '启动 AI 审核生图' : '生成图片' }}
+                </el-button>
               </div>
             </footer>
+
+            <section v-if="selectedPlan" class="quality-mode-card">
+              <div class="quality-mode-head">
+                <div>
+                  <span class="attention-label">可选 · 质量门控</span>
+                  <h3>AI 审核生图</h3>
+                  <p>让多模态模型审核每轮结果；低分会在预算内自动修订 Prompt，临界结果由你决定。</p>
+                </div>
+                <el-switch v-model="qualityModeEnabled" active-text="已开启" inactive-text="关闭" />
+              </div>
+              <div v-if="qualityModeEnabled" class="quality-mode-controls">
+                <label>审核档位
+                  <span class="quality-tier-options">
+                    <el-tooltip content="宽松：优先提高出图效率；没有关键问题且整体可用即可推荐。" placement="top"><button type="button" :class="{ selected: qualityAcceptanceTier === 'loose' }" :aria-pressed="qualityAcceptanceTier === 'loose'" @click="qualityAcceptanceTier = 'loose'">宽松</button></el-tooltip>
+                    <el-tooltip content="标准：适合常规投放；要求画面整体可靠、核心商品表现无明显短板。" placement="top"><button type="button" :class="{ selected: qualityAcceptanceTier === 'standard' }" :aria-pressed="qualityAcceptanceTier === 'standard'" @click="qualityAcceptanceTier = 'standard'">标准</button></el-tooltip>
+                    <el-tooltip content="严格：适合高要求交付；核心商品、清晰度、商品性和文字都需接近无瑕。" placement="top"><button type="button" :class="{ selected: qualityAcceptanceTier === 'strict' }" :aria-pressed="qualityAcceptanceTier === 'strict'" @click="qualityAcceptanceTier = 'strict'">严格</button></el-tooltip>
+                  </span>
+                </label>
+                <label>评分倾向
+                  <el-select v-model="qualityProfile" aria-label="质量评分倾向">
+                    <el-option label="还原优先" value="fidelity" />
+                    <el-option label="平衡" value="balanced" />
+                    <el-option label="商品性优先" value="commercial" />
+                  </el-select>
+                </label>
+                <label>每轮生图数量
+                  <el-select v-model="qualityImagesPerRound" aria-label="每轮生图数量"><el-option v-for="count in generationCounts" :key="count" :label="`${count} 张`" :value="count" /></el-select>
+                  <small class="quality-field-help">每轮最多 4 张；本次最多 20 张。</small>
+                </label>
+                <label>最大轮数
+                  <el-input-number v-model="qualityMaxRounds" :min="1" :max="qualityMaxRoundsLimit" :step="1" controls-position="right" />
+                </label>
+                <p class="quality-weight-note">{{ qualityProfileDescription }}</p>
+                <p class="quality-budget">本次最多 {{ qualityBudget }} 张图片、{{ qualityBudget }} 次多模态审核、{{ Math.max(0, qualityMaxRounds - 1) }} 次 Prompt 修订。达到上限后必定等待你的决定。</p>
+              </div>
+            </section>
 
             <el-collapse v-if="historicalPlanBatches.length" class="history-collapse">
               <el-collapse-item title="查看历史创意方案" name="history">
@@ -272,6 +305,38 @@
             </div>
             <el-button :disabled="!focusedImage" @click="openComparison(focusedImage?.id)">放大对比</el-button>
           </div>
+
+          <section v-if="latestQualityRun" class="quality-run-card" :class="`quality-${latestQualityRun.status}`">
+            <div class="quality-run-head">
+              <div>
+                <span class="attention-label">AI 审核模式</span>
+                <h3>{{ qualityRunTitle(latestQualityRun.status) }}</h3>
+                <p>{{ qualityRunMessage(latestQualityRun) }}</p>
+              </div>
+              <el-tag effect="plain" :type="qualityRunTagType(latestQualityRun.status)">第 {{ latestQualityRun.current_round }}/{{ latestQualityRun.max_rounds }} 轮</el-tag>
+            </div>
+            <div class="quality-run-facts">
+              <span>审核档位 · {{ qualityTierLabel(latestQualityRun.acceptance_tier) }}</span>
+              <span>每轮 {{ latestQualityRun.images_per_round }} 张</span>
+              <span>最高 {{ latestQualityRun.total_image_budget }} 张</span>
+              <span v-if="latestQualityRun.recommended_image_id">推荐图片 #{{ latestQualityRun.recommended_image_id }}</span>
+            </div>
+            <div v-if="latestQualityRun.status === 'awaiting_human'" class="quality-decision-actions">
+              <el-button type="primary" :loading="decidingQuality" @click="decideQuality('accept_recommended')">接受推荐候选</el-button>
+              <template v-if="latestQualityRun.current_round < latestQualityRun.max_rounds">
+                <el-button :loading="decidingQuality" @click="decideQuality('continue')">继续下一轮</el-button>
+              </template>
+              <span v-else>已达到设置的最大轮数；可接受候选或停止本次运行。</span>
+              <el-button type="danger" plain :loading="stoppingQuality" @click="stopQuality">停止本次审核</el-button>
+            </div>
+            <div v-else-if="qualityRunCanStop(latestQualityRun.status)" class="quality-run-actions">
+              <el-button type="danger" plain :loading="stoppingQuality" @click="stopQuality">停止 AI 审核</el-button>
+              <span>停止会在当前模型调用完成后生效，不会再产生下一轮调用。</span>
+            </div>
+            <el-alert v-else-if="latestQualityRun.status === 'cancelled'" type="info" :closable="false" title="本次 AI 审核已停止，已生成的图片和评分都已保留。" />
+            <el-alert v-else-if="latestQualityRun.status === 'failed'" type="error" :closable="false" :title="latestQualityRun.error_message || 'AI 审核运行失败，未自动重复外部调用。'" />
+            <el-button v-if="latestQualityRun.status === 'failed'" type="primary" plain :loading="retryingQuality" @click="retryQuality">重新启动本次审核</el-button>
+          </section>
 
           <el-empty v-if="!materialGroups.length" description="选择一个创意方向后即可发起第一轮生图">
             <el-button type="primary" @click="selectStage('plans')">选择创意方向</el-button>
@@ -305,8 +370,28 @@
                   </button>
                   <div class="material-card-meta">
                     <span v-if="image.is_selected" class="delivery-label">交付图</span>
+                    <span v-else-if="image.is_recommended" class="recommended-label">AI 推荐</span>
                     <span v-else>待你挑选</span>
+                    <strong v-if="image.score !== null && image.score !== undefined" class="image-score">AI 参考 {{ (image.score / 10).toFixed(1) }}/10</strong>
                   </div>
+                  <el-collapse v-if="image.review" class="review-collapse">
+                    <el-collapse-item title="查看 AI 审核结果" name="review">
+                      <p class="review-result-title">评分结果</p>
+                      <div class="review-score-grid">
+                        <span>还原度 {{ image.review.review.product_consistency }}/10</span>
+                        <span>清晰度 {{ image.review.review.product_clarity }}/10</span>
+                        <span>商品性 {{ image.review.review.commercial_value }}/10</span>
+                        <span>文字正确性 {{ image.review.review.text_accuracy }}/10</span>
+                      </div>
+                      <p v-if="image.review.review.summary" class="review-summary">{{ image.review.review.summary }}</p>
+                      <p v-if="image.review.review.hard_defects.length" class="review-risk">问题：{{ image.review.review.hard_defects.join('；') }}</p>
+                      <p v-else-if="image.review.review.defects.length" class="review-risk">问题：{{ image.review.review.defects.join('；') }}</p>
+                      <ul v-if="image.review.review.evidence.length" class="review-evidence">
+                        <li v-for="(evidence, evidenceIndex) in image.review.review.evidence" :key="`${image.id}-${evidenceIndex}`">{{ dimensionLabel(evidence.dimension) }}：{{ evidence.observation }}</li>
+                      </ul>
+                      <p v-if="image.review.review.prompt_revision" class="review-summary">下一轮建议：{{ image.review.review.prompt_revision }}</p>
+                    </el-collapse-item>
+                  </el-collapse>
                   <div class="material-card-actions">
                     <el-button class="delivery-button" type="primary" @click="selectDeliveryImage(image)">
                       {{ image.is_selected ? '当前交付图' : '设为交付图' }}
@@ -456,17 +541,24 @@ import {
   createImagePromptPack,
   createPlanPromptPack,
   createProject,
+  createQualityRun,
+  decideQualityRun,
   refreshCreativePlans,
   replacePrimaryAsset,
   reviseCreativePlan,
+  retryQualityRun,
   rewriteCopywriting,
   selectGeneratedImage,
   submitGenerationTask,
+  stopQualityRun,
   type CopywritingPayload,
   type CreativePlan,
   type GeneratedImage,
   type GenerationTask,
   type PromptPack,
+  type QualityAcceptanceTier,
+  type QualityProfile,
+  type QualityRun,
   updateCopywriting,
   updateProject,
   uploadAsset
@@ -501,12 +593,20 @@ const refreshingPlans = ref(false)
 const revisingPlanId = ref<number | null>(null)
 const submittingTask = ref(false)
 const submittingIteration = ref(false)
+const stoppingQuality = ref(false)
+const decidingQuality = ref(false)
+const retryingQuality = ref(false)
 const creatingCopy = ref(false)
 const rewritingCopy = ref(false)
 const selectedStage = ref<StudioStageKey>('brief')
 const selectedPlanId = ref<number | null>(null)
 const selectedImageId = ref<number | null>(null)
 const generationCount = ref(2)
+const qualityModeEnabled = ref(false)
+const qualityProfile = ref<QualityProfile>('balanced')
+const qualityAcceptanceTier = ref<QualityAcceptanceTier>('standard')
+const qualityImagesPerRound = ref(2)
+const qualityMaxRounds = ref(3)
 const plannerPlatforms = ref<string[]>([])
 const plannerStyles = ref<string[]>([])
 const plannerFeedback = ref('')
@@ -561,6 +661,17 @@ const materialGroups = computed(() => {
   })).filter((group) => group.images.length || ['queued', 'running', 'failed'].includes(group.task.status))
 })
 const activeTask = computed(() => store.current?.generation_tasks.find((task) => ['queued', 'running'].includes(task.status)) || null)
+const latestQualityRun = computed(() => store.current?.quality_runs?.[0] || null)
+const activeQualityRun = computed(() =>
+  store.current?.quality_runs?.find((run) => ['preparing', 'generating', 'reviewing', 'refining', 'awaiting_human', 'stop_requested'].includes(run.status)) || null
+)
+const qualityMaxRoundsLimit = computed(() => Math.max(1, Math.min(5, Math.floor(20 / qualityImagesPerRound.value))))
+const qualityBudget = computed(() => qualityImagesPerRound.value * qualityMaxRounds.value)
+const qualityProfileDescription = computed(() => ({
+  fidelity: '还原优先：还原度 40%、清晰度 25%、商品性 15%、文字正确性 20%。',
+  balanced: '平衡：还原度 30%、清晰度 25%、商品性 25%、文字正确性 20%。',
+  commercial: '商品性优先：还原度 20%、清晰度 20%、商品性 40%、文字正确性 20%。'
+} as Record<QualityProfile, string>)[qualityProfile.value])
 const latestFailure = computed(() => {
   const latest = store.current?.workflow_events[0]
   return latest?.status === 'failed' ? latest : null
@@ -573,6 +684,12 @@ const pageDescription = computed(() => hasProject.value ? '按商品隔离进度
 const workflowDisplay = computed<{ status: WorkflowUiStatus; title: string; message: string; primaryLabel?: string; startedAt?: string | null }>(() => {
   if (!hasProject.value) return { status: 'idle', title: '准备商品与原图', message: '填写最少商品信息并上传原图，确认后才会进入后续工作流。' }
   if (currentOperation.value) return { status: 'running', title: currentOperation.value.title, message: currentOperation.value.message, startedAt: currentOperation.value.startedAt }
+  if (activeQualityRun.value && qualityRunCanStop(activeQualityRun.value.status)) {
+    return { status: 'running', title: qualityRunTitle(activeQualityRun.value.status), message: qualityRunMessage(activeQualityRun.value), startedAt: activeQualityRun.value.started_at || activeQualityRun.value.created_at }
+  }
+  if (activeQualityRun.value?.status === 'awaiting_human') {
+    return { status: 'action_required', title: qualityRunTitle(activeQualityRun.value.status), message: qualityRunMessage(activeQualityRun.value), primaryLabel: '查看 AI 审核' }
+  }
   if (latestFailure.value && !activeTask.value) return { status: 'failed', title: '最近一步需要处理', message: latestFailure.value.error_message || latestFailure.value.summary, primaryLabel: '查看对应阶段', startedAt: latestFailure.value.started_at }
   if (activeTask.value) return { status: 'running', title: '正在生成素材', message: taskStatusText(activeTask.value), startedAt: activeTask.value.started_at || activeTask.value.created_at }
   if (!sourceConfirmed.value) return { status: 'action_required', title: '等待确认商品与原图', message: '确认后商品信息和原图会锁定，成为后续保真基准。', primaryLabel: '去确认' }
@@ -597,7 +714,7 @@ const studioStages = computed<StudioStage[]>(() => {
     brief: sourceConfirmed.value ? 'success' : 'current',
     analysis: strategy.value ? 'success' : (visualAnalysis.value ? 'current' : 'available'),
     plans: currentPlans.value.length ? 'success' : 'available',
-    generation: activeTask.value ? 'running' : (allImages.value.length ? 'success' : 'available'),
+    generation: activeTask.value || activeQualityRun.value ? 'running' : (allImages.value.length ? 'success' : 'available'),
     delivery: selectedImage.value?.is_selected ? 'success' : 'available'
   }
   const labels: Record<StudioStageKey, [string, string, string]> = {
@@ -625,6 +742,9 @@ watch(selectedImage, () => syncCopyEditor(), { immediate: true })
 watch(activeCopy, () => syncCopyEditor())
 watch(copyEditor, scheduleCopySave, { deep: true, flush: 'sync' })
 watch(briefForm, scheduleDraftSave, { deep: true })
+watch(qualityMaxRoundsLimit, (limit) => {
+  if (qualityMaxRounds.value > limit) qualityMaxRounds.value = limit
+})
 
 async function loadFromRoute() {
   const requestId = ++routeLoadId
@@ -873,6 +993,10 @@ async function confirmStrategy() {
   } catch (error) { ElMessage.error(errorMessage(error)) } finally { confirmingStrategy.value = false }
 }
 
+function selectPlan(planId: number) {
+  selectedPlanId.value = planId
+}
+
 async function generateDirections() {
   if (!hasProject.value) return
   refreshingPlans.value = true
@@ -901,9 +1025,22 @@ async function revisePlan(plan: CreativePlan) {
 async function startGeneration() {
   const plan = selectedPlan.value
   if (!hasProject.value || !plan) return ElMessage.warning('请先选择一个创意方向')
-  if (activeTask.value) return ElMessage.warning('当前商品已有出图任务在运行，请等待完成后再发起下一轮。')
+  if (activeTask.value || activeQualityRun.value) return ElMessage.warning('当前商品已有未结束的素材任务或 AI 审核，请先等待完成或停止。')
   submittingTask.value = true
   try {
+    if (qualityModeEnabled.value) {
+      await createQualityRun(projectId.value, {
+        plan_id: plan.id,
+        quality_profile: qualityProfile.value,
+        acceptance_tier: qualityAcceptanceTier.value,
+        images_per_round: qualityImagesPerRound.value,
+        max_rounds: qualityMaxRounds.value
+      })
+      await store.refresh(projectId.value)
+      selectStage('generation')
+      ElMessage.success('AI 审核模式已启动，将按质量结果决定是否继续生成')
+      return
+    }
     const promptPack = await runWithOperation('images', '正在构建 Prompt Pack', '正在把选定的创意方向转为图片生成提示词。', () => createPlanPromptPack(projectId.value, plan.id))
     if (!promptPack) return
     await submitGenerationTask(projectId.value, promptPack.id, generationCount.value)
@@ -911,6 +1048,36 @@ async function startGeneration() {
     selectStage('generation')
     ElMessage.success('本轮 Prompt Pack 已创建，素材任务已提交')
   } catch (error) { ElMessage.error(errorMessage(error)) } finally { submittingTask.value = false }
+}
+
+async function stopQuality() {
+  if (!hasProject.value || !latestQualityRun.value) return
+  stoppingQuality.value = true
+  try {
+    await stopQualityRun(projectId.value, latestQualityRun.value.id)
+    await store.refresh(projectId.value)
+    ElMessage.success('已请求停止 AI 审核；当前模型调用完成后将不再进入下一轮')
+  } catch (error) { ElMessage.error(errorMessage(error)) } finally { stoppingQuality.value = false }
+}
+
+async function decideQuality(action: 'accept_recommended' | 'continue') {
+  if (!hasProject.value || !latestQualityRun.value) return
+  decidingQuality.value = true
+  try {
+    await decideQualityRun(projectId.value, latestQualityRun.value.id, action)
+    await store.refresh(projectId.value)
+    ElMessage.success(action === 'continue' ? '已继续下一轮 AI 审核' : '已接受推荐候选；仍可手动选择交付图')
+  } catch (error) { ElMessage.error(errorMessage(error)) } finally { decidingQuality.value = false }
+}
+
+async function retryQuality() {
+  if (!hasProject.value || !latestQualityRun.value) return
+  retryingQuality.value = true
+  try {
+    await retryQualityRun(projectId.value, latestQualityRun.value.id)
+    await store.refresh(projectId.value)
+    ElMessage.success('已重新启动 AI 审核；不会重复使用失败的外部调用。')
+  } catch (error) { ElMessage.error(errorMessage(error)) } finally { retryingQuality.value = false }
 }
 
 function openIteration(image: GeneratedImage) {
@@ -953,6 +1120,29 @@ function taskStatusText(task: GenerationTask) {
   if (task.status === 'queued') return `已提交 ${task.requested_count} 张，正在排队。`
   if (task.status === 'running') return `已生成 ${task.generated_count}/${task.requested_count} 张，正在处理。`
   return `本轮已完成 ${task.generated_count} 张素材。`
+}
+function qualityRunCanStop(status: string) { return ['preparing', 'generating', 'reviewing', 'refining', 'stop_requested'].includes(status) }
+function qualityRunTitle(status: string) {
+  return ({ preparing: '正在准备审核 Prompt', generating: '正在生成审核候选', reviewing: '正在多模态审图', refining: '正在修订下一轮 Prompt', awaiting_human: '等待你的质量决策', stop_requested: '正在停止 AI 审核', completed: 'AI 审核已完成', cancelled: 'AI 审核已停止', failed: 'AI 审核失败' } as Record<string, string>)[status] || status
+}
+function qualityRunMessage(run: QualityRun) {
+  if (run.status === 'awaiting_human') return '最佳候选处于临界分数或已达到最大轮数，请决定是否接受或继续。'
+  if (run.status === 'completed') return '系统仅推荐候选图；是否设为交付图仍由你决定。'
+  if (run.status === 'stop_requested') return '已阻止下一轮调用，正在等待当前模型调用完成。'
+  if (run.status === 'cancelled') return '所有已生成图片和评分已保留，未再产生下一轮调用。'
+  if (run.status === 'failed') return run.error_message || '外部调用失败，系统没有自动重复调用以避免成本失控。'
+  return `当前为“${qualityTierLabel(run.acceptance_tier)}”档位，系统最多会生成 ${run.total_image_budget} 张图片。`
+}
+function qualityTierLabel(tier: QualityAcceptanceTier) { return ({ loose: '宽松', standard: '标准', strict: '严格' } as Record<QualityAcceptanceTier, string>)[tier] }
+function qualityRunTagType(status: string): 'warning' | 'primary' | 'success' | 'danger' | 'info' {
+  if (status === 'completed') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'awaiting_human' || status === 'stop_requested') return 'warning'
+  if (status === 'cancelled') return 'info'
+  return 'primary'
+}
+function dimensionLabel(dimension: string) {
+  return ({ product_consistency: '商品还原度', product_clarity: '主体清晰度', commercial_value: '商品性', text_accuracy: '文字正确性', style_match: '风格匹配', platform_fit: '平台适配' } as Record<string, string>)[dimension] || dimension
 }
 
 async function generateCopy() {
@@ -1025,6 +1215,7 @@ async function copyText(value: string) {
 function joinValues(values?: string[]) { return values?.filter(Boolean).join('；') || '未识别' }
 
 function handleStatusPrimary() {
+  if (activeQualityRun.value?.status === 'awaiting_human') { selectStage('generation'); return }
   if (!sourceConfirmed.value) { selectStage('brief'); return }
   if (!visualAnalysis.value) { selectStage('analysis'); runVisual(); return }
   if (!visualAnalysis.value.analysis.human_reviewed) { selectStage('analysis'); return }
@@ -1042,6 +1233,8 @@ function selectWorkflowStep(stepKey: string) {
     analysis: 'analysis',
     plans: 'plans',
     images: 'generation',
+    review: 'generation',
+    quality_run: 'generation',
     copy: 'delivery'
   }
   selectStage(stageByStep[stepKey] || 'brief')
@@ -1108,7 +1301,8 @@ function selectWorkflowStep(stepKey: string) {
 .choice-group :deep(.el-checkbox-button__inner) { border-left: 1px solid var(--el-border-color) !important; border-radius: 999px !important; }
 .planner-condition-footer { display: flex; justify-content: space-between; align-items: center; gap: 15px; }
 .plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 22px; }
-.plan-card { display: flex; flex-direction: column; min-width: 0; padding: 20px; border: 1px solid var(--ps-border); border-radius: var(--ps-radius); background: var(--ps-surface); transition: border-color 160ms ease, box-shadow 160ms ease; }
+.plan-card { display: flex; flex-direction: column; min-width: 0; padding: 20px; border: 1px solid var(--ps-border); border-radius: var(--ps-radius); background: var(--ps-surface); cursor: pointer; transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease; }
+.plan-card:hover, .plan-card:focus-visible { border-color: color-mix(in srgb, var(--ps-primary) 52%, var(--ps-border)); box-shadow: 0 8px 20px rgba(35, 38, 32, 0.08); outline: none; transform: translateY(-1px); }
 .plan-card.selected { border-color: var(--ps-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ps-primary) 13%, transparent); }
 .plan-index { color: var(--ps-muted); font-size: 12px; font-weight: 700; }
 .plan-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 15px 0; }
@@ -1117,10 +1311,27 @@ function selectWorkflowStep(stepKey: string) {
 .plan-details { margin-top: 15px; }
 .plan-details :deep(.el-collapse-item__header) { color: var(--ps-primary); font-size: 12px; font-weight: 760; }
 .plan-facts { display: grid; gap: 12px; margin: 0; padding: 4px 0 8px; }
-.plan-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: auto; }
+.plan-card-status { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .plan-revision { margin-top: 15px; }
 .selection-bar { align-items: center; }
 .generation-start-actions .el-select { width: 92px; }
+.quality-mode-card, .quality-run-card { margin-top: 18px; padding: 20px; border: 1px solid color-mix(in srgb, var(--ps-primary) 25%, var(--ps-border)); border-radius: var(--ps-radius); background: color-mix(in srgb, var(--ps-primary-soft) 52%, var(--ps-surface)); }
+.quality-mode-head, .quality-run-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.quality-mode-head h3, .quality-run-head h3 { margin: 5px 0; color: var(--ps-heading); font-size: 18px; }
+.quality-mode-head p, .quality-run-head p { margin: 0; color: var(--ps-muted-strong); font-size: 13px; line-height: 1.55; }
+.quality-mode-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+.quality-mode-controls label { display: grid; gap: 7px; color: var(--ps-muted-strong); font-size: 12px; font-weight: 720; }
+.quality-mode-controls .el-select, .quality-mode-controls .el-input-number { width: 100%; }
+.quality-tier-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }.quality-tier-options button { min-height: 32px; border: 1px solid var(--ps-border-strong); border-radius: 8px; color: var(--ps-muted-strong); background: var(--ps-surface); font: inherit; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }.quality-tier-options button:hover { border-color: var(--ps-primary); color: var(--ps-primary); }.quality-tier-options button.selected { border-color: var(--ps-primary); color: #fff; background: var(--ps-primary); }.quality-field-help { color: var(--ps-muted); font-size: 11px; font-weight: 500; line-height: 1.4; }
+.quality-budget, .quality-weight-note { grid-column: 1 / -1; margin: 0; padding-top: 4px; font-size: 12px; line-height: 1.55; }
+.quality-budget { color: var(--ps-primary); }
+.quality-weight-note { color: var(--ps-muted-strong); }
+.quality-run-card { display: grid; gap: 13px; margin-bottom: 18px; }
+.quality-run-card.quality-awaiting_human { border-color: color-mix(in srgb, var(--ps-accent) 55%, var(--ps-border)); background: color-mix(in srgb, var(--ps-accent-soft) 58%, var(--ps-surface)); }
+.quality-run-card.quality-failed { border-color: color-mix(in srgb, var(--ps-danger) 55%, var(--ps-border)); }
+.quality-run-facts, .quality-decision-actions, .quality-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.quality-run-facts span { padding: 5px 8px; border-radius: 999px; color: var(--ps-primary); background: var(--ps-surface); font-size: 12px; font-weight: 700; }
+.quality-decision-actions > span, .quality-run-actions > span { color: var(--ps-muted-strong); font-size: 12px; line-height: 1.45; }
 .history-batch { display: grid; gap: 3px; padding: 9px 0; border-bottom: 1px solid var(--ps-border); color: var(--ps-muted-strong); font-size: 13px; }
 .material-groups { display: grid; gap: 18px; }
 .material-reference { position: sticky; top: 142px; z-index: 8; display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; gap: 13px; align-items: center; margin-bottom: 18px; padding: 12px; border: 1px solid color-mix(in srgb, var(--ps-primary) 18%, var(--ps-border)); border-radius: var(--ps-radius); background: color-mix(in srgb, var(--ps-surface) 94%, transparent); box-shadow: 0 8px 22px rgba(35, 38, 32, 0.08); backdrop-filter: blur(14px); }
@@ -1139,6 +1350,14 @@ function selectWorkflowStep(stepKey: string) {
 .material-image-button img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: #f3f1eb; }
 .material-card-meta { display: flex; justify-content: space-between; gap: 6px; padding: 9px 11px 0; color: var(--ps-muted); font-size: 12px; }
 .delivery-label { color: var(--ps-primary); font-weight: 800; }
+.recommended-label, .image-score { color: var(--ps-accent-dark); font-weight: 800; }
+.image-score { margin-left: auto; }
+.review-collapse { margin: 9px 10px 0; }
+.review-collapse :deep(.el-collapse-item__header) { height: 31px; color: var(--ps-primary); font-size: 12px; font-weight: 700; }
+.review-result-title { margin: 0 0 8px; color: var(--ps-heading); font-size: 12px; font-weight: 780; }.review-score-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; color: var(--ps-muted-strong); font-size: 12px; }
+.review-summary, .review-risk { margin: 9px 0 0; color: var(--ps-muted-strong); font-size: 12px; line-height: 1.5; }
+.review-risk { color: var(--ps-danger); }
+.review-evidence { display: grid; gap: 5px; margin: 9px 0 0; padding-left: 17px; color: var(--ps-muted-strong); font-size: 12px; line-height: 1.45; }
 .material-card-actions { justify-content: space-between; padding: 10px; }
 .delivery-button { min-width: 0; flex: 1; }
 .more-actions { display: grid; justify-items: start; }
@@ -1161,5 +1380,5 @@ function selectWorkflowStep(stepKey: string) {
 .iteration-actions { display: flex; gap: 10px; margin-top: 12px; }
 .iteration-actions .el-select { width: 92px; }
 @media (max-width: 1040px) { .plan-grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 720px) { .studio-header, .stage-action-bar, .planner-condition-footer, .delivery-layout { grid-template-columns: 1fr; display: grid; }.source-workspace, .form-grid, .summary-grid, .plan-grid, .iteration-dialog { grid-template-columns: 1fr; }.stage-section { padding: 18px; }.source-workspace { padding: 15px; }.stage-action-bar { align-items: stretch; }.stage-action-bar .el-button { width: 100%; }.selection-bar { align-items: stretch; }.generation-start-actions { width: 100%; }.generation-start-actions .el-select { flex: 1; }.generation-start-actions .el-button { flex: 2; }.plan-revision, .copy-rewrite, .iteration-actions { align-items: stretch; flex-direction: column; }.inline-actions { align-items: stretch; flex-direction: column-reverse; }.inline-actions .el-button { width: 100%; }.material-reference { position: static; grid-template-columns: 56px minmax(0, 1fr); }.material-reference img { width: 56px; height: 56px; }.material-reference .el-button { grid-column: 1 / -1; } }
+@media (max-width: 720px) { .studio-header, .stage-action-bar, .planner-condition-footer, .delivery-layout { grid-template-columns: 1fr; display: grid; }.source-workspace, .form-grid, .summary-grid, .plan-grid, .iteration-dialog, .quality-mode-controls { grid-template-columns: 1fr; }.stage-section { padding: 18px; }.source-workspace { padding: 15px; }.stage-action-bar { align-items: stretch; }.stage-action-bar .el-button { width: 100%; }.selection-bar { align-items: stretch; }.generation-start-actions { width: 100%; }.generation-start-actions .el-select { flex: 1; }.generation-start-actions .el-button { flex: 2; }.plan-revision, .copy-rewrite, .iteration-actions { align-items: stretch; flex-direction: column; }.inline-actions { align-items: stretch; flex-direction: column-reverse; }.inline-actions .el-button { width: 100%; }.material-reference { position: static; grid-template-columns: 56px minmax(0, 1fr); }.material-reference img { width: 56px; height: 56px; }.material-reference .el-button { grid-column: 1 / -1; }.quality-mode-head, .quality-run-head { align-items: stretch; flex-direction: column; } }
 </style>

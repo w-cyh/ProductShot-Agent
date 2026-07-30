@@ -10,6 +10,9 @@ class Settings:
     upload_dir = backend_dir / "uploads"
     generated_dir = upload_dir / "generated"
     database_url = os.getenv("DATABASE_URL", f"sqlite:///{data_dir / 'productshot.db'}")
+    celery_broker_url = os.getenv("CELERY_BROKER_URL", "")
+    celery_result_backend = os.getenv("CELERY_RESULT_BACKEND", "")
+    celery_task_always_eager = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() in {"1", "true", "yes"}
     image_provider = os.getenv("IMAGE_PROVIDER", "").lower()
     text_provider = os.getenv("TEXT_PROVIDER", "").lower()
     openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -37,6 +40,10 @@ class Settings:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.generated_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def quality_runtime_ready(self) -> bool:
+        return self.database_url.startswith("postgresql") and bool(self.celery_broker_url)
 
 
 settings = Settings()

@@ -12,10 +12,23 @@ from app.models import (
     CreativePlanBatch,
     GeneratedImage,
     GenerationTask,
+    ModelNameHistory,
+    ModelRuntimeSettings,
     ProductAsset,
     Project,
     PromptPack,
+    ProviderModelConfig,
+    QualityRun,
     WorkflowEvent,
+)
+from app.model_settings import (
+    IMAGE_PROVIDERS,
+    MODEL_KINDS,
+    TEXT_PROVIDERS,
+    current_provider_values,
+    model_name_history,
+    resolve_model_config,
+    upsert_model_name_history,
 )
 from app.providers import get_text_provider
 from app.providers.text_provider import ProviderConfigurationError, TextProviderError, TextProviderUnavailable
@@ -35,6 +48,7 @@ from app.schemas import (
     GenerationTaskPage,
     GenerationTaskRead,
     ModelConnectionTestRead,
+    ModelNameHistoryRead,
     ModelSettingsRead,
     ModelSettingsUpdate,
     ProductAnalysisRead,
@@ -46,18 +60,20 @@ from app.schemas import (
     ProjectDetail,
     ProjectRead,
     ProjectUpdate,
+    QualityRunCreate,
+    QualityRunDecisionRequest,
+    QualityRunDetailRead,
+    QualityRunRead,
     SelectImageRequest,
     StrategyCorrectionRequest,
     VisualAnalysisCorrectionRequest,
     WorkflowEventRead,
 )
 from app.services import ProductShotWorkflow
+from app.services.quality import QualityRunWorkflow, QualityRuntimeUnavailable
 from app.storage import remove_upload_file, save_upload_file
 
 router = APIRouter(prefix="/api")
-
-TEXT_PROVIDERS = {"openai", "dashscope"}
-IMAGE_PROVIDERS = {"openai", "dashscope"}
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -71,6 +87,8 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
             selectinload(Project.prompt_packs),
             selectinload(Project.generation_tasks).selectinload(GenerationTask.prompt_pack),
             selectinload(Project.generated_images).selectinload(GeneratedImage.task).selectinload(GenerationTask.plan),
+            selectinload(Project.generated_images).selectinload(GeneratedImage.reviews),
+            selectinload(Project.quality_runs),
             selectinload(Project.copywriting_items),
             selectinload(Project.workflow_events),
         )
@@ -88,32 +106,72 @@ def require_editable_source(project: Project) -> None:
 
 
 @router.get("/model-settings", response_model=ModelSettingsRead)
-def get_model_settings() -> ModelSettingsRead:
-    return _model_settings_read()
+def get_model_settings(db: Session = Depends(get_db)) -> ModelSettingsRead:
+    return _model_settings_read(db)
 
 
 @router.put("/model-settings", response_model=ModelSettingsRead)
-def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsRead:
+def update_model_settings(payload: ModelSettingsUpdate, db: Session = Depends(get_db)) -> ModelSettingsRead:
     updates = payload.model_dump(exclude_unset=True)
+    current = resolve_model_config(db)
+    runtime = db.get(ModelRuntimeSettings, 1)
+    if runtime is None:
+        runtime = ModelRuntimeSettings(
+            id=1,
+            text_provider=current.text_provider,
+            image_provider=current.image_provider,
+        )
+        db.add(runtime)
     if "text_provider" in updates:
         value = updates["text_provider"].lower()
         if value not in TEXT_PROVIDERS:
             raise HTTPException(status_code=400, detail="不支持的文字模型 Provider")
-        settings.text_provider = value
+        runtime.text_provider = value
     if "image_provider" in updates:
         value = updates["image_provider"].lower()
         if value not in IMAGE_PROVIDERS:
             raise HTTPException(status_code=400, detail="不支持的图片模型 Provider")
-        settings.image_provider = value
+        runtime.image_provider = value
     for provider_name, provider_updates in updates.get("providers", {}).items():
         if provider_name not in TEXT_PROVIDERS:
             raise HTTPException(status_code=400, detail="不支持的模型 Provider 配置")
-        _update_provider_settings(provider_name, provider_updates)
-    return _model_settings_read()
+        provider_config = (
+            db.query(ProviderModelConfig).filter(ProviderModelConfig.provider == provider_name).first()
+        )
+        if provider_config is None:
+            provider_config = ProviderModelConfig(
+                provider=provider_name,
+                **current_provider_values(current, provider_name),
+            )
+            db.add(provider_config)
+        for field in ("text_model", "vision_model", "image_model"):
+            if field in provider_updates and provider_updates[field] is not None:
+                setattr(provider_config, field, provider_updates[field].strip())
+        if "base_url" in provider_updates and provider_updates["base_url"] and provider_updates["base_url"].strip():
+            provider_config.base_url = provider_updates["base_url"].rstrip("/")
+        for model_kind in MODEL_KINDS:
+            if model_kind in provider_updates:
+                upsert_model_name_history(db, provider_name, model_kind, getattr(provider_config, model_kind))
+    db.commit()
+    return _model_settings_read(db)
+
+
+@router.delete("/model-settings/model-name-history/{history_id}", response_model=ModelSettingsRead)
+def delete_model_name_history(history_id: int, db: Session = Depends(get_db)) -> ModelSettingsRead:
+    row = db.get(ModelNameHistory, history_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="模型历史记录不存在")
+    current = resolve_model_config(db)
+    active_value = current_provider_values(current, row.provider).get(row.model_kind)
+    if active_value == row.model_name:
+        raise HTTPException(status_code=409, detail="正在使用的模型名称不能删除，请先保存并切换为其他模型。")
+    db.delete(row)
+    db.commit()
+    return _model_settings_read(db)
 
 
 @router.post("/model-settings/test-text", response_model=ModelConnectionTestRead)
-def test_text_model_connection() -> ModelConnectionTestRead:
+def test_text_model_connection(db: Session = Depends(get_db)) -> ModelConnectionTestRead:
     started = perf_counter()
     checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
     try:
@@ -139,7 +197,7 @@ def test_text_model_connection() -> ModelConnectionTestRead:
         message = f"LLM connection test failed: {exc}"
 
     return ModelConnectionTestRead(
-        provider=provider.name if provider else (settings.text_provider or "unconfigured"),
+        provider=provider.name if provider else (resolve_model_config(db).text_provider or "unconfigured"),
         model=model,
         status=status,
         latency_ms=max(0, int((perf_counter() - started) * 1000)),
@@ -148,51 +206,41 @@ def test_text_model_connection() -> ModelConnectionTestRead:
     )
 
 
-def _model_settings_read() -> ModelSettingsRead:
+def _model_settings_read(db: Session) -> ModelSettingsRead:
+    current = resolve_model_config(db)
+    history = {
+        provider: {
+            kind: [
+                ModelNameHistoryRead(
+                    id=item.id,
+                    provider=item.provider,
+                    model_kind=item.model_kind,
+                    model_name=item.model_name,
+                )
+                for item in values
+            ]
+            for kind, values in grouped.items()
+        }
+        for provider, grouped in model_name_history(db).items()
+    }
     return ModelSettingsRead(
-        text_provider=settings.text_provider,
-        image_provider=settings.image_provider,
+        text_provider=current.text_provider,
+        image_provider=current.image_provider,
         providers={
             "openai": {
-                "text_model": settings.openai_text_model,
-                "vision_model": settings.openai_text_model,
-                "image_model": settings.openai_image_model,
-                "base_url": settings.openai_base_url,
+                **current_provider_values(current, "openai"),
                 "api_key_configured": bool(settings.openai_api_key),
             },
             "dashscope": {
-                "text_model": settings.dashscope_text_model,
-                "vision_model": settings.dashscope_vision_model,
-                "image_model": settings.dashscope_image_model,
-                "base_url": settings.dashscope_base_http_api_url,
+                **current_provider_values(current, "dashscope"),
                 "api_key_configured": bool(settings.dashscope_api_key),
             },
         },
         dashscope_workspace_id_configured=bool(settings.dashscope_workspace_id),
         available_text_providers=sorted(TEXT_PROVIDERS),
         available_image_providers=sorted(IMAGE_PROVIDERS),
+        model_name_history=history,
     )
-
-
-def _update_provider_settings(provider_name: str, updates: dict[str, str]) -> None:
-    if provider_name == "openai":
-        if "text_model" in updates:
-            settings.openai_text_model = updates["text_model"].strip()
-        if "image_model" in updates:
-            settings.openai_image_model = updates["image_model"].strip()
-        if "base_url" in updates and updates["base_url"].strip():
-            settings.openai_base_url = updates["base_url"].rstrip("/")
-        return
-    if "text_model" in updates:
-        settings.dashscope_text_model = updates["text_model"].strip()
-    if "vision_model" in updates:
-        settings.dashscope_vision_model = updates["vision_model"].strip()
-    if "image_model" in updates:
-        settings.dashscope_image_model = updates["image_model"].strip()
-    if "base_url" in updates and updates["base_url"].strip():
-        settings.dashscope_base_http_api_url = updates["base_url"].rstrip("/")
-        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
-        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
 
 
 @router.post("/projects", response_model=ProjectRead)
@@ -291,6 +339,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
         creative_plan_batches=[workflow.creative_plan_batch_read(item) for item in project.creative_plan_batches],
         prompt_packs=[workflow.prompt_pack_read(item) for item in project.prompt_packs],
         generation_tasks=[workflow.task_read(item) for item in project.generation_tasks],
+        quality_runs=[QualityRunWorkflow(db).read(item) for item in sorted(project.quality_runs, key=lambda item: item.id, reverse=True)],
         generated_images=[workflow.image_read(item) for item in project.generated_images],
         latest_copywriting=workflow.copywriting_read(latest_copy) if latest_copy else None,
         copywriting=[workflow.copywriting_read(item) for item in current_copywriting],
@@ -591,6 +640,78 @@ def retry_generation_task(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(workflow.run_generation_task_in_background, retry.id)
     return retry
+
+
+@router.post("/projects/{project_id}/quality-runs", response_model=QualityRunRead, status_code=202)
+def create_quality_run(
+    project_id: int,
+    payload: QualityRunCreate,
+    db: Session = Depends(get_db),
+) -> QualityRunRead:
+    project = get_project_or_404(db, project_id)
+    plan = db.query(CreativePlan).filter(CreativePlan.id == payload.plan_id, CreativePlan.project_id == project_id).first()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="创意方案不存在")
+    quality = QualityRunWorkflow(db)
+    try:
+        run = quality.create(project, plan, payload)
+        return quality.read(run)
+    except QualityRuntimeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/quality-runs/{quality_run_id}", response_model=QualityRunDetailRead)
+def get_quality_run(project_id: int, quality_run_id: int, db: Session = Depends(get_db)) -> QualityRunDetailRead:
+    get_project_or_404(db, project_id)
+    run = db.query(QualityRun).filter(QualityRun.id == quality_run_id, QualityRun.project_id == project_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="AI 审核运行不存在")
+    return QualityRunWorkflow(db).detail(run)
+
+
+@router.post("/projects/{project_id}/quality-runs/{quality_run_id}/stop", response_model=QualityRunRead, status_code=202)
+def stop_quality_run(project_id: int, quality_run_id: int, db: Session = Depends(get_db)) -> QualityRunRead:
+    get_project_or_404(db, project_id)
+    run = db.query(QualityRun).filter(QualityRun.id == quality_run_id, QualityRun.project_id == project_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="AI 审核运行不存在")
+    quality = QualityRunWorkflow(db)
+    return quality.read(quality.request_stop(run))
+
+
+@router.post("/projects/{project_id}/quality-runs/{quality_run_id}/retry", response_model=QualityRunRead, status_code=202)
+def retry_quality_run(project_id: int, quality_run_id: int, db: Session = Depends(get_db)) -> QualityRunRead:
+    get_project_or_404(db, project_id)
+    run = db.query(QualityRun).filter(QualityRun.id == quality_run_id, QualityRun.project_id == project_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="AI 审核运行不存在")
+    quality = QualityRunWorkflow(db)
+    try:
+        return quality.read(quality.retry(run))
+    except QualityRuntimeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/quality-runs/{quality_run_id}/decision", response_model=QualityRunRead, status_code=202)
+def decide_quality_run(
+    project_id: int,
+    quality_run_id: int,
+    payload: QualityRunDecisionRequest,
+    db: Session = Depends(get_db),
+) -> QualityRunRead:
+    get_project_or_404(db, project_id)
+    run = db.query(QualityRun).filter(QualityRun.id == quality_run_id, QualityRun.project_id == project_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="AI 审核运行不存在")
+    quality = QualityRunWorkflow(db)
+    try:
+        return quality.read(quality.decide(run, payload.action))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/generated-images", response_model=list[GeneratedImageRead])

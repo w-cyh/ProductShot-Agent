@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -39,6 +39,7 @@ class Project(Base):
     generated_images: Mapped[list["GeneratedImage"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     copywriting_items: Mapped[list["Copywriting"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     workflow_events: Mapped[list["WorkflowEvent"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    quality_runs: Mapped[list["QualityRun"]] = relationship(cascade="all, delete-orphan", back_populates="project")
 
 
 class ProductAsset(Base):
@@ -144,6 +145,7 @@ class GenerationTask(Base):
     plan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("creative_plans.id"), nullable=True, index=True)
     prompt_pack_id: Mapped[Optional[int]] = mapped_column(ForeignKey("prompt_packs.id"), nullable=True, index=True)
     parent_image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    quality_run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("quality_runs.id"), nullable=True, index=True)
     iteration: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     requested_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     generated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -168,6 +170,7 @@ class GenerationTask(Base):
         cascade="all, delete-orphan",
         back_populates="task",
     )
+    quality_run: Mapped[Optional["QualityRun"]] = relationship(back_populates="generation_tasks")
 
 
 class GeneratedImage(Base):
@@ -201,20 +204,83 @@ class ImageReview(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     image_id: Mapped[int] = mapped_column(ForeignKey("generated_images.id"), nullable=False, index=True)
-    overall_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
     product_clarity_score: Mapped[int] = mapped_column(Integer, nullable=False)
     product_consistency_score: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
     style_match_score: Mapped[int] = mapped_column(Integer, nullable=False)
     commercial_value_score: Mapped[int] = mapped_column(Integer, nullable=False)
     platform_fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    text_accuracy_score: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
     text_artifact_risk: Mapped[str] = mapped_column(String(40), default="low", nullable=False)
     ai_artifact_risk: Mapped[str] = mapped_column(String(40), default="low", nullable=False)
     recommendation_level: Mapped[str] = mapped_column(String(40), default="usable", nullable=False)
     defects_json: Mapped[str] = mapped_column(Text, nullable=False)
     suggestions_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    hard_defects_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    prompt_revision: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    quality_run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("quality_runs.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     image: Mapped[GeneratedImage] = relationship(back_populates="reviews")
+    quality_run: Mapped[Optional["QualityRun"]] = relationship(back_populates="reviews")
+
+
+class QualityRun(Base):
+    __tablename__ = "quality_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("creative_plans.id"), nullable=False, index=True)
+    quality_profile: Mapped[str] = mapped_column(String(40), nullable=False)
+    acceptance_tier: Mapped[str] = mapped_column(String(40), default="standard", nullable=False)
+    target_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    images_per_round: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_image_budget: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="preparing", nullable=False, index=True)
+    current_round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    stop_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pending_revision: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    recommended_image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    lease_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="quality_runs")
+    plan: Mapped[CreativePlan] = relationship()
+    rounds: Mapped[list["QualityRound"]] = relationship(cascade="all, delete-orphan", back_populates="quality_run")
+    generation_tasks: Mapped[list[GenerationTask]] = relationship(back_populates="quality_run")
+    reviews: Mapped[list[ImageReview]] = relationship(back_populates="quality_run")
+    recommended_image: Mapped[Optional[GeneratedImage]] = relationship(foreign_keys=[recommended_image_id])
+
+
+class QualityRound(Base):
+    __tablename__ = "quality_rounds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    quality_run_id: Mapped[int] = mapped_column(ForeignKey("quality_runs.id"), nullable=False, index=True)
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_pack_id: Mapped[Optional[int]] = mapped_column(ForeignKey("prompt_packs.id"), nullable=True, index=True)
+    generation_task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generation_tasks.id"), nullable=True, index=True)
+    best_image_id: Mapped[Optional[int]] = mapped_column(ForeignKey("generated_images.id"), nullable=True, index=True)
+    best_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="preparing", nullable=False)
+    outcome: Mapped[str] = mapped_column(String(40), default="", nullable=False)
+    review_summary_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    quality_run: Mapped[QualityRun] = relationship(back_populates="rounds")
+    prompt_pack: Mapped[Optional[PromptPack]] = relationship()
+    generation_task: Mapped[Optional[GenerationTask]] = relationship(foreign_keys=[generation_task_id])
+    best_image: Mapped[Optional[GeneratedImage]] = relationship(foreign_keys=[best_image_id])
 
 
 class Copywriting(Base):

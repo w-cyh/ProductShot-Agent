@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
@@ -221,6 +221,7 @@ class GenerationTaskRead(BaseModel):
     plan_id: Optional[int]
     prompt_pack_id: Optional[int] = None
     parent_image_id: Optional[int] = None
+    quality_run_id: Optional[int] = None
     iteration: int = 1
     requested_count: int = 1
     generated_count: int = 0
@@ -243,18 +244,37 @@ class GenerationTaskDetailRead(BaseModel):
     images: list["GeneratedImageRead"] = Field(default_factory=list)
 
 
+class ImageReviewEvidence(BaseModel):
+    # style_match and platform_fit remain readable for existing stored reviews.
+    dimension: Literal[
+        "product_consistency",
+        "product_clarity",
+        "commercial_value",
+        "text_accuracy",
+        "style_match",
+        "platform_fit",
+    ]
+    observation: str = Field(min_length=1, max_length=500)
+    severity: Literal["info", "warning", "blocking"] = "info"
+
+
 class ImageReviewPayload(BaseModel):
-    overall_score: int
-    product_clarity: int
-    product_consistency: int = 80
-    style_match: int
-    commercial_value: int
-    platform_fit: int
-    text_artifact_risk: str = "low"
+    # The application calculates the weighted total. The model scores each
+    # concrete review dimension on the human-readable 1–10 scale.
+    overall_score: float = Field(default=0, ge=0, le=100)
+    product_clarity: int = Field(ge=1, le=10)
+    product_consistency: int = Field(ge=1, le=10)
+    commercial_value: int = Field(ge=1, le=10)
+    text_accuracy: int = Field(ge=1, le=10)
+    text_artifact_risk: str = "unknown"
     ai_artifact_risk: str = "low"
     recommendation_level: str = "usable"
-    defects: list[str]
-    suggestions: list[str]
+    defects: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    evidence: list[ImageReviewEvidence] = Field(default_factory=list)
+    hard_defects: list[str] = Field(default_factory=list)
+    prompt_revision: str = ""
+    summary: str = ""
 
 
 class ImageReviewRead(BaseModel):
@@ -289,6 +309,128 @@ class GeneratedImagesResponse(BaseModel):
     task: GenerationTaskRead
     prompt: PromptPackPayload
     images: list[GeneratedImageRead]
+
+
+QUALITY_PROFILE_WEIGHTS: dict[str, dict[str, float]] = {
+    "fidelity": {
+        "product_consistency": 0.40,
+        "product_clarity": 0.25,
+        "commercial_value": 0.15,
+        "text_accuracy": 0.20,
+    },
+    "balanced": {
+        "product_consistency": 0.30,
+        "product_clarity": 0.25,
+        "commercial_value": 0.25,
+        "text_accuracy": 0.20,
+    },
+    "commercial": {
+        "product_consistency": 0.20,
+        "product_clarity": 0.20,
+        "commercial_value": 0.40,
+        "text_accuracy": 0.20,
+    },
+}
+
+QUALITY_PROFILE_PRIMARY_DIMENSION = {
+    "fidelity": "product_consistency",
+    "balanced": "product_consistency",
+    "commercial": "commercial_value",
+}
+
+QUALITY_ACCEPTANCE_TIERS = {
+    "loose": {"target_score": 75, "minimum_dimension": 60, "primary_minimum": 70},
+    "standard": {"target_score": 85, "minimum_dimension": 65, "primary_minimum": 75},
+    "strict": {"target_score": 92, "minimum_dimension": 75, "primary_minimum": 85},
+}
+
+
+class QualityRunCreate(BaseModel):
+    plan_id: int
+    quality_profile: Literal["fidelity", "balanced", "commercial"] = "balanced"
+    acceptance_tier: Literal["loose", "standard", "strict"] = "standard"
+    # Kept as an input-only compatibility escape hatch for existing clients.
+    target_score: Optional[int] = Field(default=None, ge=70, le=95)
+    images_per_round: int = Field(default=2, ge=1, le=4)
+    max_rounds: int = Field(default=3, ge=1, le=5)
+
+    @property
+    def total_image_budget(self) -> int:
+        return self.images_per_round * self.max_rounds
+
+    @property
+    def resolved_target_score(self) -> int:
+        return self.target_score if self.target_score is not None else QUALITY_ACCEPTANCE_TIERS[self.acceptance_tier]["target_score"]
+
+    @field_validator("max_rounds")
+    @classmethod
+    def validate_rounds(cls, value: int, info):
+        images_per_round = info.data.get("images_per_round", 2)
+        if value * images_per_round > 20:
+            raise ValueError("单次 AI 审核最多生成 20 张图片。")
+        return value
+
+
+class QualityRunDecisionRequest(BaseModel):
+    action: Literal["accept_recommended", "continue"]
+
+
+class QualityScoreBreakdown(BaseModel):
+    overall_score: float
+    product_consistency: int
+    product_clarity: int
+    commercial_value: int
+    text_accuracy: int
+    target_score: int
+    is_accepted: bool
+    is_borderline: bool
+    has_hard_defect: bool
+
+
+class QualityRoundRead(BaseModel):
+    id: int
+    quality_run_id: int
+    round_number: int
+    prompt_pack_id: Optional[int] = None
+    generation_task_id: Optional[int] = None
+    best_image_id: Optional[int] = None
+    best_score: Optional[float] = None
+    status: str
+    outcome: str
+    review_summary: dict = Field(default_factory=dict)
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
+    images: list[GeneratedImageRead] = Field(default_factory=list)
+
+
+class QualityRunRead(BaseModel):
+    id: int
+    project_id: int
+    plan_id: int
+    quality_profile: Literal["fidelity", "balanced", "commercial"]
+    acceptance_tier: Literal["loose", "standard", "strict"]
+    target_score: int
+    images_per_round: int
+    max_rounds: int
+    total_image_budget: int
+    status: str
+    current_round: int
+    stop_requested: bool
+    recommended_image_id: Optional[int] = None
+    error_message: Optional[str] = None
+    started_at: Optional[UtcDateTime] = None
+    completed_at: Optional[UtcDateTime] = None
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
+
+
+class QualityRunDetailRead(QualityRunRead):
+    profile_weights: dict[str, float]
+    primary_dimension: str
+    remaining_rounds: int
+    max_review_calls: int
+    max_prompt_revisions: int
+    rounds: list[QualityRoundRead] = Field(default_factory=list)
 
 
 class CopywritingRequest(BaseModel):
@@ -341,6 +483,13 @@ class ProviderModelSettingsUpdate(BaseModel):
     base_url: Optional[str] = Field(default=None, max_length=300)
 
 
+class ModelNameHistoryRead(BaseModel):
+    id: int
+    provider: Literal["openai", "dashscope"]
+    model_kind: Literal["text_model", "vision_model", "image_model"]
+    model_name: str
+
+
 class ModelSettingsRead(BaseModel):
     text_provider: str
     image_provider: str
@@ -348,6 +497,7 @@ class ModelSettingsRead(BaseModel):
     dashscope_workspace_id_configured: bool
     available_text_providers: list[str]
     available_image_providers: list[str]
+    model_name_history: dict[str, dict[str, list[ModelNameHistoryRead]]] = Field(default_factory=dict)
 
 
 class ModelSettingsUpdate(BaseModel):
@@ -390,6 +540,7 @@ class ProjectDetail(ProjectRead):
     creative_plan_batches: list[CreativePlanBatchRead] = Field(default_factory=list)
     prompt_packs: list[PromptPackRead] = Field(default_factory=list)
     generation_tasks: list[GenerationTaskRead] = Field(default_factory=list)
+    quality_runs: list[QualityRunRead] = Field(default_factory=list)
     generated_images: list[GeneratedImageRead]
     latest_copywriting: Optional[CopywritingRead]
     copywriting: list[CopywritingRead] = Field(default_factory=list)

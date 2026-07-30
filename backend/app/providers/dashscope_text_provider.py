@@ -6,16 +6,17 @@ from typing import Any
 
 from app.config import settings
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError, TextProviderError, TextProviderUnavailable
+from app.model_settings import ProviderRuntimeConfig
 
 
 class DashscopeTextProvider:
     name = "dashscope"
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_config: ProviderRuntimeConfig | None = None) -> None:
         self.api_key = settings.dashscope_api_key
-        self.model = settings.dashscope_text_model
-        self.vision_model = settings.dashscope_vision_model
-        self.base_url = settings.dashscope_base_http_api_url.rstrip("/")
+        self.model = runtime_config.text_model if runtime_config else settings.dashscope_text_model
+        self.vision_model = runtime_config.vision_model if runtime_config else settings.dashscope_vision_model
+        self.base_url = (runtime_config.base_url if runtime_config else settings.dashscope_base_http_api_url).rstrip("/")
         self.workspace_id = settings.dashscope_workspace_id
 
     def generate_json(
@@ -50,10 +51,11 @@ class DashscopeTextProvider:
         *,
         system_prompt: str,
         user_prompt: str,
-        image_path: str,
         schema_name: str,
         schema: dict[str, Any],
         temperature: float = 0.2,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
             raise ProviderConfigurationError("DASHSCOPE_API_KEY is not configured.")
@@ -63,8 +65,12 @@ class DashscopeTextProvider:
                 "a DashScope multimodal model, such as qwen3-vl-plus."
             )
 
+        resolved_paths = image_paths or ([image_path] if image_path else [])
+        if not resolved_paths:
+            raise ProviderRequestError("DashScope multimodal requests require at least one image path.")
+
         content = [
-            {"image": self._image_reference(image_path)},
+            *[{"image": self._image_reference(path)} for path in resolved_paths],
             {
                 "text": (
                     f"{system_prompt}\n\n"

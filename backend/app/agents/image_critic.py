@@ -26,8 +26,15 @@ class ImageCriticAgent:
         if source_image_path:
             data = self.text_provider.generate_multimodal_json(
                 system_prompt=(
-                    "You are a strict ecommerce image reviewer. Compare the generated image against "
-                    "the original product constraints and score marketing usefulness in Chinese JSON."
+                    "You are a strict ecommerce image reviewer. The first image is the confirmed source product "
+                    "and the second image is a generated marketing candidate. Compare them against the product "
+                    "constraints. Return exactly four integer scores from 1 to 10: product_consistency (fidelity to "
+                    "the source), product_clarity, commercial_value, and text_accuracy. Text accuracy means source "
+                    "labels and logos are not corrupted and the image contains no accidental or garbled promotional "
+                    "text; the intended upper-right copy area should remain clean and blank. Report problems in defects, "
+                    "only clear release-blocking defects in hard_defects, give concrete evidence, and provide a minimal "
+                    "prompt_revision for a retry. "
+                    "Do not decide the final overall score; the application calculates it."
                 ),
                 user_prompt=json.dumps(
                     {
@@ -47,7 +54,7 @@ class ImageCriticAgent:
                     },
                     ensure_ascii=False,
                 ),
-                image_path=image.image_path,
+                image_paths=[source_image_path, image.image_path],
                 schema_name="ImageReviewPayload",
                 schema=ImageReviewPayload.model_json_schema(),
                 temperature=0.2,
@@ -61,8 +68,10 @@ class ImageCriticAgent:
             provider=self.text_provider,
             payload_type=ImageReviewPayload,
             system_prompt=(
-                "You are a strict ecommerce creative reviewer. Score the generated asset for product clarity, "
-                "style match, commercial value, and platform fit. Use integers from 0 to 100."
+                "You are a strict ecommerce creative reviewer. Return four integer scores from 1 to 10 for product "
+                "consistency, product clarity, commercial value, and text accuracy. Text accuracy requires correct "
+                "source labels/logos and no garbled or accidental promotional text; the upper-right copy area should "
+                "remain clean and blank. List concrete problems and retry advice in Chinese JSON."
             ),
             user_prompt=json.dumps(
                 {

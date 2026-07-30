@@ -144,6 +144,7 @@ export interface GenerationTask {
   plan_id?: number | null
   prompt_pack_id?: number | null
   parent_image_id?: number | null
+  quality_run_id?: number | null
   iteration: number
   requested_count: number
   generated_count: number
@@ -191,8 +192,90 @@ export interface GeneratedImage {
   image_path: string
   width?: number | null
   height?: number | null
+  score?: number | null
   is_selected: boolean
+  is_recommended: boolean
+  review?: ImageReview | null
   created_at: string
+}
+
+export interface ImageReviewEvidence {
+  dimension: 'product_consistency' | 'product_clarity' | 'commercial_value' | 'text_accuracy' | 'style_match' | 'platform_fit'
+  observation: string
+  severity: 'info' | 'warning' | 'blocking'
+}
+
+export interface ImageReviewPayload {
+  overall_score: number
+  product_clarity: number
+  product_consistency: number
+  commercial_value: number
+  text_accuracy: number
+  text_artifact_risk: string
+  ai_artifact_risk: string
+  recommendation_level: string
+  defects: string[]
+  suggestions: string[]
+  evidence: ImageReviewEvidence[]
+  hard_defects: string[]
+  prompt_revision: string
+  summary: string
+}
+
+export interface ImageReview {
+  id: number
+  image_id: number
+  review: ImageReviewPayload
+  created_at: string
+}
+
+export type QualityProfile = 'fidelity' | 'balanced' | 'commercial'
+export type QualityAcceptanceTier = 'loose' | 'standard' | 'strict'
+
+export interface QualityRun {
+  id: number
+  project_id: number
+  plan_id: number
+  quality_profile: QualityProfile
+  acceptance_tier: QualityAcceptanceTier
+  target_score: number
+  images_per_round: number
+  max_rounds: number
+  total_image_budget: number
+  status: string
+  current_round: number
+  stop_requested: boolean
+  recommended_image_id?: number | null
+  error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface QualityRound {
+  id: number
+  quality_run_id: number
+  round_number: number
+  prompt_pack_id?: number | null
+  generation_task_id?: number | null
+  best_image_id?: number | null
+  best_score?: number | null
+  status: string
+  outcome: string
+  review_summary: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  images: GeneratedImage[]
+}
+
+export interface QualityRunDetail extends QualityRun {
+  profile_weights: Record<string, number>
+  primary_dimension: string
+  remaining_rounds: number
+  max_review_calls: number
+  max_prompt_revisions: number
+  rounds: QualityRound[]
 }
 
 export interface GeneratedImagesResponse {
@@ -227,6 +310,7 @@ export interface ModelSettings {
   dashscope_workspace_id_configured: boolean
   available_text_providers: string[]
   available_image_providers: string[]
+  model_name_history: Record<string, Record<ModelNameKind, ModelNameHistory[]>>
 }
 
 export interface ProviderModelSettings {
@@ -235,6 +319,15 @@ export interface ProviderModelSettings {
   image_model: string
   base_url: string
   api_key_configured: boolean
+}
+
+export type ModelNameKind = 'text_model' | 'vision_model' | 'image_model'
+
+export interface ModelNameHistory {
+  id: number
+  provider: 'openai' | 'dashscope'
+  model_kind: ModelNameKind
+  model_name: string
 }
 
 export type ModelSettingsUpdate = Partial<
@@ -277,6 +370,7 @@ export interface ProjectDetail extends Project {
   creative_plan_batches: CreativePlanBatch[]
   prompt_packs: PromptPack[]
   generation_tasks: GenerationTask[]
+  quality_runs: QualityRun[]
   generated_images: GeneratedImage[]
   latest_copywriting?: CopywritingRead | null
   copywriting: CopywritingRead[]
@@ -409,6 +503,40 @@ export async function retryGenerationTask(projectId: number, taskId: number) {
   return data
 }
 
+export async function createQualityRun(
+  projectId: number,
+  payload: {
+    plan_id: number
+    quality_profile: QualityProfile
+    acceptance_tier: QualityAcceptanceTier
+    images_per_round: number
+    max_rounds: number
+  }
+) {
+  const { data } = await http.post<QualityRun>(`/api/projects/${projectId}/quality-runs`, payload)
+  return data
+}
+
+export async function getQualityRun(projectId: number, qualityRunId: number) {
+  const { data } = await http.get<QualityRunDetail>(`/api/projects/${projectId}/quality-runs/${qualityRunId}`)
+  return data
+}
+
+export async function stopQualityRun(projectId: number, qualityRunId: number) {
+  const { data } = await http.post<QualityRun>(`/api/projects/${projectId}/quality-runs/${qualityRunId}/stop`)
+  return data
+}
+
+export async function retryQualityRun(projectId: number, qualityRunId: number) {
+  const { data } = await http.post<QualityRun>(`/api/projects/${projectId}/quality-runs/${qualityRunId}/retry`)
+  return data
+}
+
+export async function decideQualityRun(projectId: number, qualityRunId: number, action: 'accept_recommended' | 'continue') {
+  const { data } = await http.post<QualityRun>(`/api/projects/${projectId}/quality-runs/${qualityRunId}/decision`, { action })
+  return data
+}
+
 export async function selectGeneratedImage(projectId: number, imageId: number) {
   const { data } = await http.post<GeneratedImage>(`/api/projects/${projectId}/generated-images/${imageId}/select`, { selected: true })
   return data
@@ -438,6 +566,11 @@ export async function getModelSettings() {
 
 export async function updateModelSettings(payload: ModelSettingsUpdate) {
   const { data } = await http.put<ModelSettings>('/api/model-settings', payload)
+  return data
+}
+
+export async function deleteModelNameHistory(historyId: number) {
+  const { data } = await http.delete<ModelSettings>(`/api/model-settings/model-name-history/${historyId}`)
   return data
 }
 

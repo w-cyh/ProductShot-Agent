@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv*/
+.env.local
+.dev-services/
+backend/data/*.pre-remote-import.db
 node_modules/
 dist/
 backend/data/

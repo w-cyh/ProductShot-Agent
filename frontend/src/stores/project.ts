@@ -52,13 +52,16 @@ function initialSteps(): WorkflowStep[] {
     { key: 'analysis', title: '商品策略', status: 'pending', description: '提炼卖点、人群与营销机会' },
     { key: 'plans', title: '创意方向', status: 'pending', description: '生成 3 个可选方向' },
     { key: 'images', title: '素材生成', status: 'pending', description: '按方向沉淀图片素材' },
+    { key: 'review', title: 'AI 审核', status: 'pending', description: '评估质量并决定下一步' },
     { key: 'copy', title: '发布文案', status: 'pending', description: '为交付图生成当前稿' }
   ]
 }
 
 function hasActiveWork(detail: ProjectDetail | null | undefined) {
   if (!detail) return false
-  return detail.generation_tasks.some((task) => ['queued', 'running'].includes(task.status)) || detail.workflow_events.some(
+  return detail.generation_tasks.some((task) => ['queued', 'running'].includes(task.status)) || detail.quality_runs.some(
+    (run) => ['preparing', 'generating', 'reviewing', 'refining', 'stop_requested'].includes(run.status)
+  ) || detail.workflow_events.some(
     (event) => ['queued', 'running'].includes(event.status)
   )
 }
@@ -83,6 +86,12 @@ function stepsForDetail(detail: ProjectDetail | null | undefined): WorkflowStep[
   if (detail.creative_plans.some((plan) => plan.is_current)) set('plans', 'success')
   if (detail.generation_tasks.some((task) => ['queued', 'running'].includes(task.status))) set('images', 'running')
   else if (detail.generated_images.length) set('images', 'success')
+  const latestQualityRun = detail.quality_runs[0]
+  if (latestQualityRun) {
+    if (['preparing', 'generating', 'reviewing', 'refining', 'stop_requested'].includes(latestQualityRun.status)) set('review', 'running')
+    else if (latestQualityRun.status === 'failed') set('review', 'failed')
+    else if (['completed', 'awaiting_human', 'cancelled'].includes(latestQualityRun.status)) set('review', 'success')
+  }
   if (detail.copywriting.length) set('copy', 'success')
   steps.forEach((step) => {
     const eventStatus = statusForEvent(step.key)

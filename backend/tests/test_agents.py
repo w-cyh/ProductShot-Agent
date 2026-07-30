@@ -8,22 +8,17 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.agents import ProductAnalysisAgent, VisualAnalysisAgent
-from app.api.routes import (
-    _model_settings_read,
-    _update_provider_settings,
-    test_text_model_connection as run_text_model_connection_test,
-)
+from app.agents import ImageCriticAgent, ProductAnalysisAgent, VisualAnalysisAgent
 from app.config import settings
 from app.database import Base
-from app.models import ProductAsset, Project, WorkflowEvent
+from app.models import GeneratedImage, ProductAsset, Project, WorkflowEvent
 from app.providers import get_text_provider
 from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.dashscope_text_provider import DashscopeTextProvider
 from app.providers.openai_image_provider import OpenAIImageProvider
 from app.providers.openai_text_provider import OpenAITextProvider
 from app.providers.text_provider import ProviderConfigurationError, ProviderRequestError
-from app.schemas import ProductAnalysisPayload, VisualAnalysisPayload
+from app.schemas import CreativePlanPayload, ProductAnalysisPayload, VisualAnalysisPayload
 from app.services import ProductShotWorkflow
 
 
@@ -127,7 +122,7 @@ def test_dashscope_text_provider_uses_generation_sdk(monkeypatch):
     assert calls["messages"][1] == {"role": "user", "content": "user"}
 
 
-def test_dashscope_text_provider_uses_multimodal_sdk_for_images(monkeypatch, tmp_path: Path):
+def test_dashscope_text_provider_uses_multimodal_sdk_for_multiple_images(monkeypatch, tmp_path: Path):
     calls = {}
     dashscope_module = ModuleType("dashscope")
     dashscope_module.base_http_api_url = ""
@@ -144,22 +139,65 @@ def test_dashscope_text_provider_uses_multimodal_sdk_for_images(monkeypatch, tmp
     monkeypatch.setattr(settings, "dashscope_text_model", "qwen-vl-test")
     monkeypatch.setattr(settings, "dashscope_vision_model", "qwen3-vl-test")
     monkeypatch.setattr(settings, "dashscope_workspace_id", None)
-    image = tmp_path / "source.png"
-    image.write_bytes(b"image")
+    source = tmp_path / "source.png"
+    generated = tmp_path / "generated.png"
+    source.write_bytes(b"source")
+    generated.write_bytes(b"generated")
 
     provider = DashscopeTextProvider()
     result = provider.generate_multimodal_json(
         system_prompt="system",
         user_prompt="user",
-        image_path=str(image),
+        image_paths=[str(source), str(generated)],
         schema_name="Test",
         schema={"type": "object"},
     )
 
     assert result == {"ok": True}
     assert calls["model"] == "qwen3-vl-test"
-    assert calls["messages"][0]["content"][0]["image"] == image.resolve().as_uri()
+    assert calls["messages"][0]["content"][0]["image"] == source.resolve().as_uri()
+    assert calls["messages"][0]["content"][1]["image"] == generated.resolve().as_uri()
     assert "workspace" not in calls
+
+
+def test_image_critic_sends_source_and_candidate_to_multimodal_provider(tmp_path: Path):
+    class CapturingProvider:
+        name = "fake"
+        model = "fake-vl"
+
+        def __init__(self):
+            self.image_paths = []
+
+        def generate_multimodal_json(self, **kwargs):
+            self.image_paths = kwargs["image_paths"]
+            return {
+                "product_consistency": 9,
+                "product_clarity": 9,
+                "commercial_value": 8,
+                "text_accuracy": 8,
+            }
+
+    source = tmp_path / "source.png"
+    candidate = tmp_path / "candidate.png"
+    source.write_bytes(b"source")
+    candidate.write_bytes(b"candidate")
+    provider = CapturingProvider()
+    image = GeneratedImage(id=2, task_id=1, project_id=1, image_url="/uploads/candidate.png", image_path=str(candidate))
+    plan = CreativePlanPayload(
+        plan_name="生活方式",
+        applicable_platform="小红书",
+        visual_description="自然场景",
+        background_scene="窗边",
+        visual_style="自然",
+        main_selling_point="手工质感",
+        recommendation_reason="适合目标用户",
+        copywriting_direction="克制分享",
+    )
+
+    review = ImageCriticAgent(provider).run(sample_project(), image, plan, source_image_path=str(source))
+
+    assert provider.image_paths == [str(source), str(candidate)]
+    assert review.product_consistency == 9
 
 
 def test_dashscope_multimodal_url_error_suggests_vision_model(monkeypatch, tmp_path: Path):
@@ -338,23 +376,6 @@ def test_openai_image_provider_generates_and_edits(monkeypatch, tmp_path: Path):
     assert edited[0].image_path.read_bytes() == b"png"
     assert calls[0][0].endswith("/images/generations")
     assert calls[1][0].endswith("/images/edits")
-
-
-def test_connection_test_reports_unconfigured_provider(monkeypatch):
-    monkeypatch.setattr(settings, "text_provider", "")
-    result = run_text_model_connection_test()
-    assert result.status == "failed"
-    assert result.provider == "unconfigured"
-    assert "TEXT_PROVIDER" in result.message
-
-
-def test_model_settings_updates_dashscope_vision_model(monkeypatch):
-    monkeypatch.setattr(settings, "dashscope_vision_model", "")
-
-    _update_provider_settings("dashscope", {"vision_model": "qwen3-vl-test"})
-
-    assert settings.dashscope_vision_model == "qwen3-vl-test"
-    assert _model_settings_read().providers["dashscope"].vision_model == "qwen3-vl-test"
 
 
 def test_agents_do_not_fall_back_to_local_rules():

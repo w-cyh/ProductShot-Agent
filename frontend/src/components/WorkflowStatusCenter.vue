@@ -225,6 +225,7 @@ function stepLabel(stepKey: string) {
     prompt: 'Prompt 构建',
     images: '素材生成',
     review: '质量评价',
+    quality_run: 'AI 审核循环',
     copy: '发布文案',
     revision: '修改计划'
   }
@@ -420,7 +421,7 @@ function eventDetailText(event: WorkflowEvent) {
 
 .compact-steps {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 7px;
   overflow: visible;
 }

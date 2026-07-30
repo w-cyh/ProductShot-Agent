@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.agents import (
     CopywritingAgent,
     CreativePlannerAgent,
+    ImageCriticAgent,
     ProductAnalysisAgent,
     PromptEngineerAgent,
     VisualAnalysisAgent,
@@ -17,11 +18,14 @@ from app.models import (
     CreativePlanBatch,
     GeneratedImage,
     GenerationTask,
+    ImageReview,
     ProductAnalysis,
     ProductAsset,
     ProductVisualAnalysis,
     PromptPack,
     Project,
+    QualityRun,
+    QualityRound,
     WorkflowEvent,
 )
 from app.database import SessionLocal
@@ -36,6 +40,8 @@ from app.schemas import (
     GeneratedImageRead,
     GeneratedImagesResponse,
     GenerationTaskRead,
+    ImageReviewPayload,
+    ImageReviewRead,
     ProductAnalysisPayload,
     ProductAnalysisRead,
     ProductVisualAnalysisRead,
@@ -65,9 +71,16 @@ class LazyTextProvider:
 
 
 def mark_interrupted_generation_tasks() -> None:
-    """Tasks run in-process; a previous process cannot resume them after restart."""
+    """Fail only legacy in-process tasks after an API restart.
+
+    Quality-run tasks are owned by the Celery worker and remain recoverable.
+    """
     with SessionLocal() as db:
-        rows = db.query(GenerationTask).filter(GenerationTask.status.in_(["queued", "running"])).all()
+        rows = (
+            db.query(GenerationTask)
+            .filter(GenerationTask.status.in_(["queued", "running"]), GenerationTask.quality_run_id.is_(None))
+            .all()
+        )
         if not rows:
             return
         now = utcnow()
@@ -87,6 +100,7 @@ class ProductShotWorkflow:
         self.analysis_agent = ProductAnalysisAgent(self.text_provider)
         self.planner_agent = CreativePlannerAgent(self.text_provider)
         self.prompt_agent = PromptEngineerAgent(self.text_provider)
+        self.image_critic = ImageCriticAgent(self.text_provider)
         self.copywriting_agent = CopywritingAgent(self.text_provider)
 
     def confirm_source(self, project: Project) -> None:
@@ -516,7 +530,16 @@ class ProductShotWorkflow:
             )
             raise
 
-    def submit_generation_task(self, project: Project, prompt_pack: PromptPack, count: int) -> GenerationTaskRead:
+    def submit_generation_task(
+        self,
+        project: Project,
+        prompt_pack: PromptPack,
+        count: int,
+        *,
+        quality_run_id: int | None = None,
+        quality_round: QualityRound | None = None,
+        iteration: int | None = None,
+    ) -> GenerationTaskRead:
         self.require_confirmed_source(project)
         provider = get_image_provider()
         provider_model = getattr(provider, "model", provider.name)
@@ -527,15 +550,27 @@ class ProductShotWorkflow:
         )
         if active:
             raise ValueError("该项目已有正在处理的素材任务，请等待完成或失败后再提交。")
+        if quality_run_id is None:
+            active_quality_run = (
+                self.db.query(QualityRun.id)
+                .filter(
+                    QualityRun.project_id == project.id,
+                    QualityRun.status.in_(["preparing", "generating", "reviewing", "refining", "awaiting_human", "stop_requested"]),
+                )
+                .first()
+            )
+            if active_quality_run:
+                raise ValueError("该项目已有未结束的 AI 审核运行，请先完成、停止或处理人工决策。")
         prompt = PromptPackPayload.model_validate_json(prompt_pack.payload_json)
         parent_image = self.db.get(GeneratedImage, prompt_pack.parent_image_id) if prompt_pack.parent_image_id else None
-        iteration = (parent_image.task.iteration + 1) if parent_image and parent_image.task else 1
+        task_iteration = iteration or ((parent_image.task.iteration + 1) if parent_image and parent_image.task else 1)
         task = GenerationTask(
             project_id=project.id,
             plan_id=prompt_pack.plan_id,
             prompt_pack_id=prompt_pack.id,
             parent_image_id=parent_image.id if parent_image else None,
-            iteration=iteration,
+            iteration=task_iteration,
+            quality_run_id=quality_run_id,
             requested_count=count,
             generated_count=0,
             reviewed_count=0,
@@ -547,6 +582,9 @@ class ProductShotWorkflow:
         )
         self.db.add(task)
         try:
+            self.db.flush()
+            if quality_round is not None:
+                quality_round.generation_task_id = task.id
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
@@ -568,6 +606,7 @@ class ProductShotWorkflow:
                 "requested_count": count,
                 "generation_mode": prompt.generation_mode,
                 "size": prompt.size,
+                "quality_run_id": quality_run_id,
             },
             started_at=utcnow(),
         )
@@ -575,7 +614,7 @@ class ProductShotWorkflow:
 
     def run_generation_task(self, task_id: int) -> None:
         task = self.db.query(GenerationTask).filter(GenerationTask.id == task_id).first()
-        if task is None or task.status not in {"queued", "running"}:
+        if task is None or task.status != "queued":
             return
         project = self.db.get(Project, task.project_id)
         prompt_pack = self.db.get(PromptPack, task.prompt_pack_id) if task.prompt_pack_id else None
@@ -965,6 +1004,7 @@ class ProductShotWorkflow:
             plan_id=row.plan_id,
             prompt_pack_id=row.prompt_pack_id,
             parent_image_id=row.parent_image_id,
+            quality_run_id=row.quality_run_id,
             iteration=row.iteration,
             requested_count=row.requested_count,
             generated_count=row.generated_count,
@@ -982,6 +1022,7 @@ class ProductShotWorkflow:
         )
 
     def image_read(self, row: GeneratedImage) -> GeneratedImageRead:
+        latest_review = max(row.reviews, key=lambda item: item.id, default=None)
         return GeneratedImageRead(
             id=row.id,
             task_id=row.task_id,
@@ -994,10 +1035,36 @@ class ProductShotWorkflow:
             image_path=row.image_path,
             width=row.width,
             height=row.height,
-            score=None,
+            score=row.score,
             is_selected=row.is_selected,
-            is_recommended=False,
-            review=None,
+            is_recommended=row.is_recommended,
+            review=self.image_review_read(latest_review) if latest_review else None,
+            created_at=row.created_at,
+        )
+
+    def image_review_read(self, row: ImageReview) -> ImageReviewRead:
+        def score_on_ten(value: int | float | None) -> int:
+            return max(1, min(10, round((value or 80) / 10)))
+
+        return ImageReviewRead(
+            id=row.id,
+            image_id=row.image_id,
+            review=ImageReviewPayload(
+                overall_score=row.overall_score,
+                product_clarity=score_on_ten(row.product_clarity_score),
+                product_consistency=score_on_ten(row.product_consistency_score),
+                commercial_value=score_on_ten(row.commercial_value_score),
+                text_accuracy=score_on_ten(getattr(row, "text_accuracy_score", 80)),
+                text_artifact_risk=row.text_artifact_risk,
+                ai_artifact_risk=row.ai_artifact_risk,
+                recommendation_level=row.recommendation_level,
+                defects=loads(row.defects_json, []),
+                suggestions=loads(row.suggestions_json, []),
+                evidence=loads(getattr(row, "evidence_json", "[]"), []),
+                hard_defects=loads(getattr(row, "hard_defects_json", "[]"), []),
+                prompt_revision=getattr(row, "prompt_revision", "") or "",
+                summary=getattr(row, "summary", "") or "",
+            ),
             created_at=row.created_at,
         )
 

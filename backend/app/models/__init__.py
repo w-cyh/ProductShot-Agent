@@ -10,8 +10,11 @@ from app.models.entities import (
     ProductVisualAnalysis,
     PromptPack,
     Project,
+    QualityRound,
+    QualityRun,
     WorkflowEvent,
 )
+from app.models.model_settings import ModelNameHistory, ModelRuntimeSettings, ProviderModelConfig
 
 __all__ = [
     "Project",
@@ -24,6 +27,11 @@ __all__ = [
     "GenerationTask",
     "GeneratedImage",
     "ImageReview",
+    "QualityRun",
+    "QualityRound",
     "Copywriting",
     "WorkflowEvent",
+    "ModelRuntimeSettings",
+    "ProviderModelConfig",
+    "ModelNameHistory",
 ]

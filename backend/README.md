@@ -21,6 +21,22 @@ uvicorn app.main:app --reload
 
 服务默认运行在 `http://127.0.0.1:8000`。
 
+### 使用远端中间件的一键本地开发
+
+本机已通过 SSH 隧道准备好 PostgreSQL、Redis 凭据时，可将私有配置放入仓库根目录的 `.env.local`（该文件被 Git 忽略），然后一键启动 API、Celery worker 与前端：
+
+```bash
+./scripts/start-dev-services.sh start
+```
+
+停止该脚本启动的进程：
+
+```bash
+./scripts/start-dev-services.sh stop
+```
+
+脚本不会停止已占用 `8000` 或 `5173` 端口的既有开发进程；需先手动停止旧进程，才能让新的环境变量对 API 生效。
+
 ## 环境变量
 
 - `DATABASE_URL`：默认 `sqlite:///backend/data/productshot.db`。
@@ -38,6 +54,8 @@ uvicorn app.main:app --reload
 - `DASHSCOPE_WORKSPACE_ID`：可选，RAM 子账号或业务空间隔离场景使用。
 - `MODEL_REQUEST_TIMEOUT`：模型 API 请求超时时间，默认 `180` 秒。
 - `CORS_ORIGINS`：前端允许来源。
+- `CELERY_BROKER_URL`：AI 审核模式的 Celery Broker 地址；生产部署使用 Redis。
+- `CELERY_RESULT_BACKEND`：可选的 Celery 结果后端地址。
 
 开发阶段使用百炼时，只需要在本机或部署环境设置变量，例如：
 
@@ -52,7 +70,29 @@ export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 
 不要在 `.env`、README、代码、测试或前端请求中写入真实 Key、个人专属 Base URL、Workspace ID 或业务空间地址。前端模型管理页只展示 Key 是否已配置，并允许调整非敏感模型配置。
 
+通过模型管理页保存后，选中的 Provider、模型名称和 Base URL 会持久化到数据库，文字、图片理解和图片生成模型名称也会分别保留在可删除的历史下拉列表中。密钥不会保存到数据库；API 与 Celery worker 都继续从环境变量读取密钥，并从数据库读取同一份非敏感模型配置。未保存过任何配置时，系统仍回退到上述环境变量。
+
 未配置有效 Provider、密钥或模型名时，系统不会降级到本地规则或占位图，而是返回说明缺失配置的错误。
+
+## AI 审核模式运行时
+
+一次生图仍可使用本地 SQLite。开启 AI 审核模式时，后端要求 `DATABASE_URL` 指向 PostgreSQL，且已配置 `CELERY_BROKER_URL`；这是为了让“生成 → 多模态审核 → Prompt 修订”循环具备持久化状态、可停止和 worker 恢复能力。
+
+本仓库提供本地演示环境：
+
+```bash
+docker compose up --build
+```
+
+它会启动 PostgreSQL、Redis、API 和 Celery worker。图片/文字模型密钥仍只应在本机或部署环境设置，不要写入 compose 文件。
+
+手动启动 worker：
+
+```bash
+cd backend
+alembic upgrade head
+celery -A app.celery_app.celery_app worker --loglevel=INFO
+```
 
 ## 主要工作流接口
 
@@ -63,4 +103,8 @@ export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 - `POST /api/projects/{project_id}/creative-plan-batches`：按可选平台、风格与反馈生成 3 个方向。
 - `POST /api/projects/{project_id}/creative-plans/{plan_id}/prompt-packs`：仅在用户决定出图时创建 Prompt Pack。
 - `POST /api/projects/{project_id}/prompt-packs/{prompt_pack_id}/generation-tasks`：提交按方向/轮次隔离的出图任务。
+- `POST /api/projects/{project_id}/quality-runs`：启动可选 AI 审核生图循环，配置评分倾向、通过分、每轮张数和最大轮数。
+- `POST /api/projects/{project_id}/quality-runs/{quality_run_id}/stop`：停止后续循环；当前外部调用完成后生效。
+- `POST /api/projects/{project_id}/quality-runs/{quality_run_id}/retry`：仅对失败的审核运行显式创建一次新的质量循环，不会重复未知状态的外部调用。
+- `POST /api/projects/{project_id}/quality-runs/{quality_run_id}/decision`：对临界结果接受推荐候选或继续预算内的下一轮。
 - `PUT /api/projects/{project_id}/copywriting/{copywriting_id}`：更新该交付图的当前文案稿。
